@@ -44,7 +44,7 @@ services:
       - ./traefik/traefik.yml:/traefik/traefik.yml:ro
       - traefik-letsencrypt:/letsencrypt
     environment:
-      - TRAEFIK_ACME_EMAIL=${TRAEFIK_ACME_EMAIL}
+      TRAEFIK_ACME_EMAIL: ${TRAEFIK_ACME_EMAIL}
     networks:
       - web
 

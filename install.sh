@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -e
+
+RED="\e[31m"
+YELLOW="\e[33m"
+GREEN="\e[32m"
+BOLD="\e[1m"
+RESET="\e[0m"
+
+echo -e "${BOLD}=== Hockey JSON Server installer ===${RESET}"
+echo
+
+# 1. Проверка root / sudo
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}Запусти этот скрипт от root (например: sudo ./install.sh)${RESET}"
+  exit 1
+fi
+
+# 2. Установка Docker + Docker Compose (если ещё нет)
+if ! command -v docker >/dev/null 2>&1; then
+  echo -e "${YELLOW}[*] Docker не найден. Устанавливаю Docker Engine и Docker Compose...${RESET}"
+  apt update
+  apt install -y ca-certificates curl gnupg
+  install -m 0755 -d /etc/apt/keyrings
+  if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+      gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  fi
+  if ! grep -q 'download.docker.com/linux/ubuntu' /etc/apt/sources.list.d/docker.list 2>/dev/null; then
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+      https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+      > /etc/apt/sources.list.d/docker.list
+  fi
+  apt update
+  apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+else
+  echo -e "${GREEN}[*] Docker уже установлен, пропускаю установку.${RESET}"
+fi
+
+echo
+
+# 3. Сбор данных от пользователя
+echo -e "${BOLD}=== Параметры инсталляции ===${RESET}"
+
+echo
+echo "Домен (FQDN) — это имя, на которое указывает A-запись DNS этого сервера."
+echo "Примеры: hockey.example.com, test-server.pestovo328.ru"
+read -rp "Домен (FQDN): " DOMAIN
+
+echo
+echo "E-mail для Let's Encrypt — будет использоваться для регистрации и уведомлений CA."
+read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
+
+echo
+echo "API-ключ — секрет для авторизации всех /api/... запросов."
+echo "Если оставить пустым, ключ будет сгенерирован контейнером автоматически при первом старте."
+echo "Этот ключ нужно будет указать в Android-приложении в настройках сервера."
+read -rp "API-ключ (можно оставить пустым, чтобы сгенерировался автоматически): " API_KEY
+
+echo
+echo -e "${BOLD}=== Параметры импорта базы ===${RESET}"
+echo "Режим импорта:"
+echo "  none  - не импортировать (создать пустую базу)"
+echo "  local - импорт из ZIP-файла, доступного на сервере"
+echo "  url   - импорт из ZIP по HTTP/HTTPS URL"
+read -rp "DB_IMPORT_MODE [none]: " DB_MODE
+DB_MODE=${DB_MODE:-none}
+
+DB_SOURCE=""
+if [ "$DB_MODE" = "local" ] || [ "$DB_MODE" = "url" ]; then
+  echo
+  if [ "$DB_MODE" = "local" ]; then
+    echo "Укажи путь к ZIP-файлу на сервере, например: /opt/backups/hockey-db.zip"
+  else
+    echo "Укажи полный URL ZIP-файла, например: https://old-server.example.com/hockey-db.zip"
+  fi
+  read -rp "DB_IMPORT_SOURCE: " DB_SOURCE
+fi
+
+echo
+echo -e "${BOLD}Резюме параметров:${RESET}"
+echo "  Домен:            $DOMAIN"
+echo "  E-mail (ACME):    $ACME_EMAIL"
+if [ -n "$API_KEY" ]; then
+  echo "  API-ключ:         (задан вручную)"
+else
+  echo "  API-ключ:         будет сгенерирован автоматически контейнером"
+fi
+echo "  DB_IMPORT_MODE:   $DB_MODE"
+echo "  DB_IMPORT_SOURCE: $DB_SOURCE"
+echo
+
+# 4. Генерация .env (перезаписываем, но оставляем тот же набор переменных)
+echo -e "${YELLOW}[*] Записываю .env...${RESET}"
+cat > .env <<EOF
+UPLOAD_API_KEY=${API_KEY}
+
+TRAEFIK_HOST=${DOMAIN}
+TRAEFIK_ACME_EMAIL=${ACME_EMAIL}
+
+DB_IMPORT_MODE=${DB_MODE}
+DB_IMPORT_SOURCE=${DB_SOURCE}
+DB_FORCE_RESET=false
+EOF
+
+echo "[*] Содержимое .env:"
+cat .env
+echo
+
+# 5. Правка traefik/traefik.yml — подставляем домен в Host(...)
+echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
+sed -i "s/Host(\`hockey.example.com\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
+
+# 6. Первый запуск docker compose
+echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
+docker compose up -d --build
+
+echo
+echo -e "${GREEN}=== Установка завершена ===${RESET}"
+echo
+echo "Проверь контейнеры:"
+echo "  docker compose ps"
+echo
+echo "Проверь HTTPS в браузере:"
+echo "  https://$DOMAIN/"
+echo
+
+# 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
+echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
+if [ -n "$API_KEY" ]; then
+  echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
+  echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
+  echo
+  echo -e "  ${BOLD}API-ключ:${RESET} ${API_KEY}"
+else
+  echo -e "${YELLOW}Ты оставил поле API-ключа пустым — ключ сгенерирован контейнером автоматически.${RESET}"
+  echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
+  echo
+  echo "Команда для получения API-ключа:"
+  echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
+  echo
+  GENERATED_KEY=\$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
+  if [ -n "\$GENERATED_KEY" ]; then
+    echo -e "${GREEN}Автоматически найден сгенерированный ключ:${RESET}"
+    echo
+    echo -e "  ${BOLD}API-ключ:${RESET} \$GENERATED_KEY"
+    echo
+  else
+    echo -e "${RED}Не удалось автоматически прочитать ключ из логов.${RESET}"
+    echo "Выполни команду вручную и запиши ключ:"
+    echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
+    echo
+  fi
+fi
+
+echo -e "${BOLD}Без правильного API-ключа Android-приложение НЕ сможет синхронизировать базу.${RESET}"
+echo
+echo "Дальше:"
+echo "  1) Запиши/сохрани API-ключ."
+echo "  2) Открой приложение на Android и внеси:"
+echo "     - адрес сервера: https://$DOMAIN"
+echo "     - API-ключ: (тот, который записал)"
+echo "  3) Проверь синхронизацию."
+echo
+

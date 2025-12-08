@@ -1,8 +1,8 @@
 http:
   routers:
     hockey:
-      # Любой запрос на HTTPS (любой Host, любой путь)
-      rule: "PathPrefix(`/`)"
+      # HTTPS только для боевого домена (шаблон по умолчанию)
+      rule: "Host(`test-server.pestovo328.ru`)"
       entryPoints:
         - websecure
       service: hockey-service
@@ -10,8 +10,8 @@ http:
         certResolver: letsencrypt
 
     hockey-http:
-      # Любой запрос на HTTP → редирект на HTTPS
-      rule: "PathPrefix(`/`)"
+      # HTTP только для того же домена → редирект на HTTPS
+      rule: "Host(`test-server.pestovo328.ru`)"
       entryPoints:
         - web
       middlewares:

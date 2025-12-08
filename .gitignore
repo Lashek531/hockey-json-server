@@ -25,3 +25,5 @@ hockey-db*.zip
 *.swo
 .idea/
 .vscode/
+.env
+hockey-db*.zip
