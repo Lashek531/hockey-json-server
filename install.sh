@@ -64,7 +64,7 @@ echo
 echo -e "${BOLD}=== Параметры импорта базы ===${RESET}"
 echo "Режим импорта:"
 echo "  none  - не импортировать (создать пустую базу)"
-echo "  local - импорт из ZIP-файла, доступного на сервере"
+echo "  local - импорт из ZIP-файла, доступного на ЭТОМ сервере"
 echo "  url   - импорт из ZIP по HTTP/HTTPS URL"
 read -rp "DB_IMPORT_MODE [none]: " DB_MODE
 DB_MODE=${DB_MODE:-none}
@@ -73,39 +73,61 @@ DB_SOURCE=""
 
 if [ "$DB_MODE" = "local" ]; then
   echo
-  echo "Укажи путь к ZIP-файлу на сервере, например: /opt/backups/hockey-db.zip"
-  read -rp "DB_IMPORT_SOURCE (Enter — отменить импорт): " DB_SOURCE
+  echo "Укажи путь к ZIP-файлу на ЭТОМ сервере, например: /opt/backups/hockey-db.zip"
+  read -rp "DB_IMPORT_SOURCE (путь к файлу, Enter — отменить импорт): " DB_SOURCE
+
   if [ -z "$DB_SOURCE" ]; then
     echo -e "${YELLOW}Источник не указан, импорт отключён. DB_IMPORT_MODE будет установлено в 'none'.${RESET}"
     DB_MODE="none"
+    DB_SOURCE=""
+  else
+    if [ ! -f "$DB_SOURCE" ]; then
+      echo -e "${RED}[!] Файл '$DB_SOURCE' не найден. Импорт отключён, чтобы сервис не упал.${RESET}"
+      DB_MODE="none"
+      DB_SOURCE=""
+    else
+      echo -e "${GREEN}[*] Локальный ZIP-файл найден: $DB_SOURCE${RESET}"
+    fi
   fi
+
 elif [ "$DB_MODE" = "url" ]; then
   echo
   echo "Можно указать либо:"
   echo "  - полный URL ZIP-файла (например: https://old-server.example.com/hockey-db.zip),"
   echo "  - либо просто домен старого сервера (например: old-hockey.example.com)."
-  echo "Во втором случае будет использован URL https://<домен>/api/download-db"
+  echo "Во втором случае будет использован URL: https://<домен>/api/download-db"
   read -rp "DB_IMPORT_SOURCE (URL или домен старого сервера, Enter — отменить импорт): " DB_SOURCE
 
   if [ -z "$DB_SOURCE" ]; then
     echo -e "${YELLOW}Источник не указан, импорт отключён. DB_IMPORT_MODE будет установлено в 'none'.${RESET}"
     DB_MODE="none"
+    DB_SOURCE=""
   else
-    case "$DB_SOURCE" in
-      http://*|https://*)
-        # Уже полный URL — ничего не делаем
-        ;;
-      *)
-        # Если нет протокола и слэшей — считаем, что это просто хост
-        if echo "$DB_SOURCE" | grep -q '/'; then
-          # Есть слэш, но нет http — оставляем как есть, считаем, что пользователь сам знает, что делает
-          :
-        else
-          echo -e "${YELLOW}Похоже, указан домен без протокола. Будет использован URL:https://$DB_SOURCE/api/download-db${RESET}"
-          DB_SOURCE="https://$DB_SOURCE/api/download-db"
-        fi
-        ;;
-    esac
+    # Нормализуем: домен → https://domain/api/download-db, если нет явного протокола
+    if echo "$DB_SOURCE" | grep -Eq '^https?://'; then
+      # Уже полный URL
+      :
+    else
+      # Нет протокола — считаем, что это домен/хост
+      if echo "$DB_SOURCE" | grep -q '/'; then
+        # Есть слэши, но нет http — добавим https:// в начало и оставим путь как есть
+        DB_SOURCE="https://$DB_SOURCE"
+      else
+        # Просто домен — приклеим типичный путь download-db
+        DB_SOURCE="https://$DB_SOURCE/api/download-db"
+      fi
+      echo -e "${YELLOW}Будет использован URL для импорта: ${DB_SOURCE}${RESET}"
+    fi
+
+    echo -e "${YELLOW}[*] Проверяю доступность URL для импортa базы...${RESET}"
+    if ! curl -sSf -m 10 -I "$DB_SOURCE" >/dev/null 2>&1; then
+      echo -e "${RED}[!] Не удалось обратиться к '$DB_SOURCE'.${RESET}"
+      echo -e "${RED}[!] Импорт базы по URL отключён, чтобы сервис не упал при старте.${RESET}"
+      DB_MODE="none"
+      DB_SOURCE=""
+    else
+      echo -e "${GREEN}[*] URL доступен, импорт по URL будет выполнен при первом старте.${RESET}"
+    fi
   fi
 fi
 
@@ -144,7 +166,6 @@ echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${D
 if grep -q "Host(\`hockey.example.com\`)" traefik/traefik.yml 2>/dev/null; then
   sed -i "s/Host(\`hockey.example.com\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
 else
-  # Если шаблон уже был изменён ранее, не трогаем файл, просто предупреждаем
   echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найден Host(\`hockey.example.com\`). Файл не изменён.${RESET}"
 fi
 
