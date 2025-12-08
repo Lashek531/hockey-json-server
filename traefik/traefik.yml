@@ -1,0 +1,30 @@
+http:
+  routers:
+    hockey:
+      # Любой запрос на HTTPS (любой Host, любой путь)
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - websecure
+      service: hockey-service
+      tls:
+        certResolver: letsencrypt
+
+    hockey-http:
+      # Любой запрос на HTTP → редирект на HTTPS
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - web
+      middlewares:
+        - https-redirect
+      service: hockey-service
+
+  middlewares:
+    https-redirect:
+      redirectScheme:
+        scheme: https
+
+  services:
+    hockey-service:
+      loadBalancer:
+        servers:
+          - url: "http://hockey-nginx:80"

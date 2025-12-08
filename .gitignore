@@ -1,0 +1,27 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+
+# Local environment and secrets
+.env
+config/settings.json
+
+# Traefik state (Let's Encrypt storage)
+traefik/acme.json
+
+# Local TLS certs (если появятся)
+certs/
+*.crt
+*.key
+
+# DB backups / exports
+hockey-db*.zip
+
+# Editor/IDE junk
+*.swp
+*.swo
+.idea/
+.vscode/
