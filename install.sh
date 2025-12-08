@@ -193,13 +193,14 @@ echo "[*] Содержимое .env:"
 cat .env
 echo
 
-# 5. Обновление traefik/traefik.yml — подставляем домен
 echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
-if grep -q "Host(\`hockey.example.com\`)" traefik/traefik.yml 2>/dev/null; then
-  sed -i "s/Host(\`hockey.example.com\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
+if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
+  # Заменяем ЛЮБОЙ Host(`...`) на Host(`$DOMAIN`) — и для HTTPS, и для HTTP-редиректа
+  sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
 else
-  echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найден Host(\`hockey.example.com\`). Файл не изменён.${RESET}"
+  echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найдено ни одного Host(...). Файл не изменён.${RESET}"
 fi
+
 
 # 6. Первый запуск docker compose
 echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
