@@ -42,16 +42,16 @@ fi
 
 echo
 
-# 3. Сбор данных от пользователя
+# 3. Параметры инсталляции
 echo -e "${BOLD}=== Параметры инсталляции ===${RESET}"
 
 echo
-echo "Домен (FQDN) — это имя, на которое указывает A-запись DNS этого сервера."
+echo "Домен (FQDN) — имя, на которое указывает A-запись DNS этого сервера."
 echo "Примеры: hockey.example.com, test-server.pestovo328.ru"
 read -rp "Домен (FQDN): " DOMAIN
 
 echo
-echo "E-mail для Let's Encrypt — будет использоваться для регистрации и уведомлений CA."
+echo "E-mail для Let's Encrypt — будет использоваться для регистрации и уведомлений."
 read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
 
 echo
@@ -70,14 +70,43 @@ read -rp "DB_IMPORT_MODE [none]: " DB_MODE
 DB_MODE=${DB_MODE:-none}
 
 DB_SOURCE=""
-if [ "$DB_MODE" = "local" ] || [ "$DB_MODE" = "url" ]; then
+
+if [ "$DB_MODE" = "local" ]; then
   echo
-  if [ "$DB_MODE" = "local" ]; then
-    echo "Укажи путь к ZIP-файлу на сервере, например: /opt/backups/hockey-db.zip"
-  else
-    echo "Укажи полный URL ZIP-файла, например: https://old-server.example.com/hockey-db.zip"
+  echo "Укажи путь к ZIP-файлу на сервере, например: /opt/backups/hockey-db.zip"
+  read -rp "DB_IMPORT_SOURCE (Enter — отменить импорт): " DB_SOURCE
+  if [ -z "$DB_SOURCE" ]; then
+    echo -e "${YELLOW}Источник не указан, импорт отключён. DB_IMPORT_MODE будет установлено в 'none'.${RESET}"
+    DB_MODE="none"
   fi
-  read -rp "DB_IMPORT_SOURCE: " DB_SOURCE
+elif [ "$DB_MODE" = "url" ]; then
+  echo
+  echo "Можно указать либо:"
+  echo "  - полный URL ZIP-файла (например: https://old-server.example.com/hockey-db.zip),"
+  echo "  - либо просто домен старого сервера (например: old-hockey.example.com)."
+  echo "Во втором случае будет использован URL https://<домен>/api/download-db"
+  read -rp "DB_IMPORT_SOURCE (URL или домен старого сервера, Enter — отменить импорт): " DB_SOURCE
+
+  if [ -z "$DB_SOURCE" ]; then
+    echo -e "${YELLOW}Источник не указан, импорт отключён. DB_IMPORT_MODE будет установлено в 'none'.${RESET}"
+    DB_MODE="none"
+  else
+    case "$DB_SOURCE" in
+      http://*|https://*)
+        # Уже полный URL — ничего не делаем
+        ;;
+      *)
+        # Если нет протокола и слэшей — считаем, что это просто хост
+        if echo "$DB_SOURCE" | grep -q '/'; then
+          # Есть слэш, но нет http — оставляем как есть, считаем, что пользователь сам знает, что делает
+          :
+        else
+          echo -e "${YELLOW}Похоже, указан домен без протокола. Будет использован URL:https://$DB_SOURCE/api/download-db${RESET}"
+          DB_SOURCE="https://$DB_SOURCE/api/download-db"
+        fi
+        ;;
+    esac
+  fi
 fi
 
 echo
@@ -93,7 +122,7 @@ echo "  DB_IMPORT_MODE:   $DB_MODE"
 echo "  DB_IMPORT_SOURCE: $DB_SOURCE"
 echo
 
-# 4. Генерация .env (перезаписываем, но оставляем тот же набор переменных)
+# 4. Генерация .env
 echo -e "${YELLOW}[*] Записываю .env...${RESET}"
 cat > .env <<EOF
 UPLOAD_API_KEY=${API_KEY}
@@ -110,16 +139,19 @@ echo "[*] Содержимое .env:"
 cat .env
 echo
 
-# 5. Правка traefik/traefik.yml — подставляем домен в Host(...)
+# 5. Обновление traefik/traefik.yml — подставляем домен
 echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
-sed -i "s/Host(\`hockey.example.com\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
+if grep -q "Host(\`hockey.example.com\`)" traefik/traefik.yml 2>/dev/null; then
+  sed -i "s/Host(\`hockey.example.com\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
+else
+  # Если шаблон уже был изменён ранее, не трогаем файл, просто предупреждаем
+  echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найден Host(\`hockey.example.com\`). Файл не изменён.${RESET}"
+fi
 
 # 6. Первый запуск docker compose
 echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
 docker compose up -d --build
 
-echo
-echo -e "${GREEN}=== Установка завершена ===${RESET}"
 echo
 echo "Проверь контейнеры:"
 echo "  docker compose ps"
@@ -129,24 +161,28 @@ echo "  https://$DOMAIN/"
 echo
 
 # 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
+echo
 echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
+
 if [ -n "$API_KEY" ]; then
   echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
   echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
   echo
-  echo -e "  ${BOLD}API-ключ:${RESET} ${API_KEY}"
+  echo -e "  ${BOLD}API-ключ:${RESET} $API_KEY"
+  echo
 else
-  echo -e "${YELLOW}Ты оставил поле API-ключа пустым — ключ сгенерирован контейнером автоматически.${RESET}"
+  echo -e "${YELLOW}Ты оставил поле API-ключа пустым — ключ сгенерирован автоматически контейнером.${RESET}"
   echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
   echo
   echo "Команда для получения API-ключа:"
   echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
   echo
-  GENERATED_KEY=\$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
-  if [ -n "\$GENERATED_KEY" ]; then
+
+  GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
+  if [ -n "$GENERATED_KEY" ]; then
     echo -e "${GREEN}Автоматически найден сгенерированный ключ:${RESET}"
     echo
-    echo -e "  ${BOLD}API-ключ:${RESET} \$GENERATED_KEY"
+    echo -e "  ${BOLD}API-ключ:${RESET} $GENERATED_KEY"
     echo
   else
     echo -e "${RED}Не удалось автоматически прочитать ключ из логов.${RESET}"
@@ -165,4 +201,5 @@ echo "     - адрес сервера: https://$DOMAIN"
 echo "     - API-ключ: (тот, который записал)"
 echo "  3) Проверь синхронизацию."
 echo
-
+echo -e "${GREEN}=== Установка завершена ===${RESET}"
+echo
