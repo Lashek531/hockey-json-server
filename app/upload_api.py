@@ -80,7 +80,15 @@ def trigger_rebuild_indexes() -> None:
 
 @app.before_request
 def verify_api_key():
-    """Простейшая авторизация по заголовку X-Api-Key."""
+    """Простейшая авторизация по заголовку X-Api-Key.
+
+    Все /api/... требуют ключа, КРОМЕ /api/download-db,
+    который должен быть доступен публично для автоматического импорта базы.
+    """
+    # Разрешаем публичный доступ к выгрузке базы
+    if request.path == "/api/download-db":
+        return
+
     key = request.headers.get("X-Api-Key")
     if key != API_KEY:
         abort(401)

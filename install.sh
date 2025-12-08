@@ -92,44 +92,76 @@ if [ "$DB_MODE" = "local" ]; then
 
 elif [ "$DB_MODE" = "url" ]; then
   echo
-  echo "Можно указать либо:"
-  echo "  - полный URL ZIP-файла (например: https://old-server.example.com/hockey-db.zip),"
-  echo "  - либо просто домен старого сервера (например: old-hockey.example.com)."
-  echo "Во втором случае будет использован URL: https://<домен>/api/download-db"
-  read -rp "DB_IMPORT_SOURCE (URL или домен старого сервера, Enter — отменить импорт): " DB_SOURCE
+  echo "Укажи источник базы:"
+  echo "  - либо ПОЛНЫЙ URL ZIP-файла,"
+  echo "  - либо просто домен старого сервера (например: hockey.ch73210.keenetic.pro:8443)."
+  echo "Если введён домен — будет использован URL вида:"
+  echo "    https://<домен>/api/download-db"
+  echo
+  echo "Enter — отмена импорта."
+  read -rp "DB_IMPORT_SOURCE: " DB_SOURCE
 
   if [ -z "$DB_SOURCE" ]; then
-    echo -e "${YELLOW}Источник не указан, импорт отключён. DB_IMPORT_MODE будет установлено в 'none'.${RESET}"
+    echo -e "${YELLOW}Импорт отключён по выбору пользователя.${RESET}"
     DB_MODE="none"
     DB_SOURCE=""
   else
-    # Нормализуем: домен → https://domain/api/download-db, если нет явного протокола
-    if echo "$DB_SOURCE" | grep -Eq '^https?://'; then
-      # Уже полный URL
-      :
-    else
-      # Нет протокола — считаем, что это домен/хост
-      if echo "$DB_SOURCE" | grep -q '/'; then
-        # Есть слэши, но нет http — добавим https:// в начало и оставим путь как есть
-        DB_SOURCE="https://$DB_SOURCE"
-      else
-        # Просто домен — приклеим типичный путь download-db
-        DB_SOURCE="https://$DB_SOURCE/api/download-db"
-      fi
-      echo -e "${YELLOW}Будет использован URL для импорта: ${DB_SOURCE}${RESET}"
-    fi
+    # === 1. Интерактивная проверка URL ===
+    while true; do
+      SRC="$DB_SOURCE"
 
-    echo -e "${YELLOW}[*] Проверяю доступность URL для импортa базы...${RESET}"
-    if ! curl -sSf -m 10 -I "$DB_SOURCE" >/dev/null 2>&1; then
-      echo -e "${RED}[!] Не удалось обратиться к '$DB_SOURCE'.${RESET}"
-      echo -e "${RED}[!] Импорт базы по URL отключён, чтобы сервис не упал при старте.${RESET}"
-      DB_MODE="none"
-      DB_SOURCE=""
-    else
-      echo -e "${GREEN}[*] URL доступен, импорт по URL будет выполнен при первом старте.${RESET}"
-    fi
+      # 1. Приведение к корректному URL
+      if echo "$SRC" | grep -Eq '^https?://'; then
+        : # уже полный URL
+      else
+        # если нет протокола — считаем, что это домен
+        if echo "$SRC" | grep -q '/'; then
+          SRC="https://$SRC"
+        else
+          SRC="https://$SRC/api/download-db"
+        fi
+      fi
+
+      echo -e "${YELLOW}[*] Проверяю доступность: $SRC ...${RESET}"
+
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 12 "$SRC" || echo "000")
+
+      if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+        echo -e "${GREEN}URL доступен (HTTP $HTTP_CODE). Импорт будет выполнен.${RESET}"
+        DB_SOURCE="$SRC"
+        break
+      fi
+
+      echo -e "${RED}[!] URL недоступен. Код ответа: $HTTP_CODE${RESET}"
+      echo
+      echo "  1) Ввести другой URL/домен"
+      echo "  2) Отменить импорт"
+      read -rp "Выбор [1/2]: " CH
+
+      case "$CH" in
+        1)
+          read -rp "Новый URL или домен: " DB_SOURCE
+          if [ -z "$DB_SOURCE" ]; then
+            echo -e "${YELLOW}Пустая строка — импорт отменён.${RESET}"
+            DB_MODE="none"
+            DB_SOURCE=""
+            break
+          fi
+          ;;
+        2)
+          echo -e "${YELLOW}Импорт отключён по выбору пользователя.${RESET}"
+          DB_MODE="none"
+          DB_SOURCE=""
+          break
+          ;;
+        *)
+          echo "Введите 1 или 2."
+          ;;
+      esac
+    done
   fi
 fi
+
 
 echo
 echo -e "${BOLD}Резюме параметров:${RESET}"
