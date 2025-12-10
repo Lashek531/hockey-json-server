@@ -52,7 +52,13 @@ read -rp "Домен (FQDN): " DOMAIN
 
 echo
 echo "E-mail для Let's Encrypt — будет использоваться для регистрации и уведомлений."
-read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
+while true; do
+  read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
+  if echo "$ACME_EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
+    break
+  fi
+  echo -e "${RED}[!] Похоже, адрес e-mail некорректен. Попробуй ещё раз (формат: что-то@домен.tld).${RESET}"
+done
 
 echo
 echo "API-ключ — секрет для авторизации всех /api/... запросов."
@@ -106,11 +112,11 @@ elif [ "$DB_MODE" = "url" ]; then
     DB_MODE="none"
     DB_SOURCE=""
   else
-    # === 1. Интерактивная проверка URL ===
+    # === Интерактивная проверка URL источника базы ===
     while true; do
       SRC="$DB_SOURCE"
 
-      # 1. Приведение к корректному URL
+      # Приведение к корректному URL
       if echo "$SRC" | grep -Eq '^https?://'; then
         : # уже полный URL
       else
@@ -176,8 +182,9 @@ echo "  DB_IMPORT_SOURCE: $DB_SOURCE"
 echo
 
 # 4. Генерация .env
-echo -e "${YELLOW}[*] Записываю .env...${RESET}"
-cat > .env <<EOF
+write_env() {
+  echo -e "${YELLOW}[*] Записываю .env...${RESET}"
+  cat > .env <<EOF
 UPLOAD_API_KEY=${API_KEY}
 
 TRAEFIK_HOST=${DOMAIN}
@@ -188,18 +195,25 @@ DB_IMPORT_SOURCE=${DB_SOURCE}
 DB_FORCE_RESET=false
 EOF
 
-echo "[*] Содержимое .env:"
-cat .env
-echo
+  echo "[*] Содержимое .env:"
+  cat .env
+  echo
+}
+
+write_env
 
 # 5. Обновляем traefik/traefik.yml под домен
-echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
-if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
-  # Заменяем ЛЮБОЙ Host(`...`) на Host(`$DOMAIN`) — и для HTTPS, и для HTTP-редиректа
-  sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
-else
-  echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найдено ни одного Host(...). Файл не изменён.${RESET}"
-fi
+update_traefik_host() {
+  echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
+  if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
+    # Заменяем ЛЮБОЙ Host(`...`) на Host(`$DOMAIN`) — и для HTTPS, и для HTTP-редиректа
+    sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
+  else
+    echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найдено ни одного Host(...). Файл не изменён.${RESET}"
+  fi
+}
+
+update_traefik_host
 
 # 6. Первый запуск docker compose
 echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
@@ -210,17 +224,23 @@ echo "Проверь контейнеры:"
 echo "  docker compose ps"
 echo
 
-# 6.1. Проверка выдачи HTTPS-сертификата Let's Encrypt
-echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${DOMAIN}...${RESET}"
-CERT_OK=0
-for i in $(seq 1 12); do
-  # Не используем -k: если сертификат самоподписанный или недоверенный, curl упадёт
-  if curl -sS --max-time 5 "https://$DOMAIN/" -o /dev/null; then
-    CERT_OK=1
-    break
-  fi
-  sleep 5
-done
+check_https_once() {
+  local dom="$1"
+  echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}"
+  local ok=0
+  for i in $(seq 1 12); do
+    # Не используем -k: если сертификат самоподписанный или недоверенный, curl упадёт
+    if curl -sS --max-time 5 "https://$dom/" -o /dev/null; then
+      ok=1
+      break
+    fi
+    sleep 5
+  done
+  echo "$ok"
+}
+
+# 6.1. Первая проверка HTTPS
+CERT_OK=$(check_https_once "$DOMAIN")
 
 if [ "$CERT_OK" -eq 1 ]; then
   echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
@@ -232,12 +252,53 @@ else
   echo "  2) Указывает ли A-запись домена на IP этого сервера"
   echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
   echo
-  echo "Также проверь логи Traefik на предмет ошибок ACME/Let's Encrypt:"
+  echo "Логи Traefik по ACME/Let's Encrypt:"
   echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
   echo
-  echo "Если домен был введён с ошибкой, можно:"
-  echo "  - выполнить: docker compose down"
-  echo "  - затем заново запустить ./install.sh и указать корректный домен"
+
+  read -rp "Изменить домен и e-mail и попробовать снова? [y/N]: " RETRY
+  case "$RETRY" in
+    y|Y|д|Д)
+      echo
+      echo "Введите НОВЫЙ домен (FQDN), который реально указывает на этот сервер:"
+      read -rp "Домен (FQDN): " DOMAIN
+
+      echo
+      echo "Введите НОВЫЙ корректный e-mail для Let's Encrypt:"
+      while true; do
+        read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
+        if echo "$ACME_EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
+          break
+        fi
+        echo -e "${RED}[!] Похоже, адрес e-mail некорректен. Попробуй ещё раз.${RESET}"
+      done
+
+      echo
+      echo -e "${BOLD}Новые параметры для HTTPS:${RESET}"
+      echo "  Домен:  $DOMAIN"
+      echo "  E-mail: $ACME_EMAIL"
+      echo
+
+      # Перезаписываем .env с новым доменом и e-mail (API_KEY / DB_* сохраняются)
+      write_env
+      update_traefik_host
+
+      echo -e "${YELLOW}[*] Перезапускаю docker compose с новыми параметрами домена...${RESET}"
+      docker compose up -d
+
+      CERT_OK=$(check_https_once "$DOMAIN")
+      if [ "$CERT_OK" -eq 1 ]; then
+        echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
+      else
+        echo -e "${RED}[!] Даже после изменения домена/e-mail не удалось подтвердить работу HTTPS.${RESET}"
+        echo "Проверь DNS, настройки домена и логи Traefik:"
+        echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
+      fi
+      ;;
+    *)
+      echo -e "${YELLOW}Параметры домена не менялись. Продолжаю установку, но HTTPS может быть некорректен.${RESET}"
+      ;;
+  esac
 fi
 
 # 6.2. Краткий отчёт о статусе импорта базы по логам hockey-api
@@ -259,7 +320,7 @@ if [ "$DB_MODE" != "none" ]; then
     echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
   else
     echo -e "${YELLOW}[?] Не удалось однозначно определить статус импорта по логам hockey-api.${RESET}"
-    echo "Выполни при необходимости:"
+    echo "При необходимости выполни:"
     echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
   fi
 fi
