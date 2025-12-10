@@ -162,7 +162,6 @@ elif [ "$DB_MODE" = "url" ]; then
   fi
 fi
 
-
 echo
 echo -e "${BOLD}Резюме параметров:${RESET}"
 echo "  Домен:            $DOMAIN"
@@ -193,6 +192,7 @@ echo "[*] Содержимое .env:"
 cat .env
 echo
 
+# 5. Обновляем traefik/traefik.yml под домен
 echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
 if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
   # Заменяем ЛЮБОЙ Host(`...`) на Host(`$DOMAIN`) — и для HTTPS, и для HTTP-редиректа
@@ -200,7 +200,6 @@ if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
 else
   echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найдено ни одного Host(...). Файл не изменён.${RESET}"
 fi
-
 
 # 6. Первый запуск docker compose
 echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
@@ -210,9 +209,60 @@ echo
 echo "Проверь контейнеры:"
 echo "  docker compose ps"
 echo
-echo "Проверь HTTPS в браузере:"
-echo "  https://$DOMAIN/"
-echo
+
+# 6.1. Проверка выдачи HTTPS-сертификата Let's Encrypt
+echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${DOMAIN}...${RESET}"
+CERT_OK=0
+for i in $(seq 1 12); do
+  # Не используем -k: если сертификат самоподписанный или недоверенный, curl упадёт
+  if curl -sS --max-time 5 "https://$DOMAIN/" -o /dev/null; then
+    CERT_OK=1
+    break
+  fi
+  sleep 5
+done
+
+if [ "$CERT_OK" -eq 1 ]; then
+  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
+else
+  echo -e "${RED}[!] Не удалось подтвердить работу HTTPS для https://$DOMAIN/ в отведённое время.${RESET}"
+  echo
+  echo -e "${YELLOW}Проверь, пожалуйста:${RESET}"
+  echo "  1) Правильно ли введён домен: $DOMAIN"
+  echo "  2) Указывает ли A-запись домена на IP этого сервера"
+  echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
+  echo
+  echo "Также проверь логи Traefik на предмет ошибок ACME/Let's Encrypt:"
+  echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
+  echo
+  echo "Если домен был введён с ошибкой, можно:"
+  echo "  - выполнить: docker compose down"
+  echo "  - затем заново запустить ./install.sh и указать корректный домен"
+fi
+
+# 6.2. Краткий отчёт о статусе импорта базы по логам hockey-api
+if [ "$DB_MODE" != "none" ]; then
+  echo
+  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"
+  IMPORT_LOG=$(docker logs hockey-api 2>/dev/null | grep -E "Импорт ZIP" | tail -n 1 || true)
+
+  if echo "$IMPORT_LOG" | grep -qi "успеш"; then
+    echo -e "${GREEN}[+] Импорт базы данных (режим ${DB_MODE}) из источника:${RESET}"
+    echo "    ${DB_SOURCE}"
+    echo -e "${GREEN}    завершился УСПЕШНО.${RESET}"
+  elif echo "$IMPORT_LOG" | grep -qi "ошибк"; then
+    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"
+    echo "    Последняя строка:"
+    echo "    $IMPORT_LOG"
+    echo
+    echo "Рекомендуется проверить логи подробнее:"
+    echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
+  else
+    echo -e "${YELLOW}[?] Не удалось однозначно определить статус импорта по логам hockey-api.${RESET}"
+    echo "Выполни при необходимости:"
+    echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
+  fi
+fi
 
 # 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
 echo
