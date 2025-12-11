@@ -42,6 +42,18 @@ fi
 
 echo
 
+# 2.1. Определяем публичный IP этого сервера (для проверки правильности A-записи домена)
+SERVER_IP=""
+if command -v curl >/dev/null 2>&1; then
+  SERVER_IP=$(curl -s https://ifconfig.me 2>/dev/null || curl -s https://api.ipify.org 2>/dev/null || echo "")
+fi
+
+if [ -n "$SERVER_IP" ]; then
+  echo -e "${YELLOW}[*] Определён публичный IP этого сервера:${RESET} ${BOLD}${SERVER_IP}${RESET}"
+else
+  echo -e "${YELLOW}[!] Не удалось автоматически определить публичный IP сервера. Проверка A-записи домена будет поверхностной.${RESET}"
+fi
+
 # 3. Параметры инсталляции
 echo -e "${BOLD}=== Параметры инсталляции ===${RESET}"
 
@@ -243,8 +255,28 @@ echo
 
 check_https_once() {
   local dom="$1"
-  # Информационная строка в stderr, чтобы не мешать возвращаемому значению
+
+  # Сообщение пользователю — в stderr, чтобы не мешать возвращаемому значению
   echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}" >&2
+
+  # 6.0. Проверяем, что домен указывает на IP этого сервера
+  if [ -n "$SERVER_IP" ]; then
+    local dom_ip
+    dom_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+
+    if [ -z "$dom_ip" ]; then
+      echo -e "${RED}[!] Домен ${dom} не резолвится в IPv4-адрес. Let's Encrypt не сможет подключиться к серверу.${RESET}" >&2
+      echo 0
+      return
+    fi
+
+    if [ "$dom_ip" != "$SERVER_IP" ]; then
+      echo -e "${RED}[!] Домен ${dom} сейчас указывает на IP ${dom_ip}, а этот сервер имеет IP ${SERVER_IP}.${RESET}" >&2
+      echo -e "${YELLOW}    Исправь A-запись домена или используй другой домен, затем запусти установку снова.${RESET}" >&2
+      echo 0
+      return
+    fi
+  fi
 
   local ok=0
   # даём до 24 попыток (до ~2 минут с паузами)
@@ -268,7 +300,11 @@ else
   echo
   echo -e "${YELLOW}Проверь, пожалуйста:${RESET}"
   echo "  1) Правильно ли введён домен: $DOMAIN"
-  echo "  2) Указывает ли A-запись домена на IP этого сервера"
+  if [ -n "$SERVER_IP" ]; then
+    echo "  2) Указывает ли A-запись домена на IP этого сервера: $SERVER_IP"
+  else
+    echo "  2) Указывает ли A-запись домена на IP этого сервера"
+  fi
   echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
   echo
   echo -e "${YELLOW}Текущие логи Traefik по ACME/Let's Encrypt (последние 20 строк):${RESET}"
@@ -343,7 +379,7 @@ if [ "$DB_MODE" != "none" ]; then
   else
     echo -e "${YELLOW}[?] Не удалось однозначно определить статус импорта по логам hockey-api.${RESET}"
     echo "При необходимости выполни:"
-    echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
+    echo "  docker logs hockey-api | grep 'Импорт ZIP' -н"
   fi
 fi
 
@@ -353,7 +389,7 @@ echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
 
 if [ -n "$API_KEY" ]; then
   echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
-  echo -е "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
+  echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
   echo
   echo -e "  ${BOLD}API-ключ:${RESET} $API_KEY"
   echo
