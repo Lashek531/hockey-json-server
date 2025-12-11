@@ -200,24 +200,41 @@ EOF
   echo
 }
 
-write_env
-
-# 5. Обновляем traefik/traefik.yml под домен
+# 5. Обновляем traefik/*.yml под домен
 update_traefik_host() {
-  echo -e "${YELLOW}[*] Обновляю traefik/traefik.yml под домен ${DOMAIN}...${RESET}"
-  if grep -q "Host(\`" traefik/traefik.yml 2>/dev/null; then
-    # Заменяем ЛЮБОЙ Host(`...`) на Host(`$DOMAIN`) — и для HTTPS, и для HTTP-редиректа
-    sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" traefik/traefik.yml
-  else
-    echo -e "${YELLOW}[!] Внимание: в traefik/traefik.yml не найдено ни одного Host(...). Файл не изменён.${RESET}"
+  echo -e "${YELLOW}[*] Обновляю traefik/*.yml под домен ${DOMAIN}...${RESET}"
+
+  local changed=0
+
+  for f in traefik/*.yml; do
+    [ -f "$f" ] || continue
+
+    if grep -q "Host(\`" "$f" 2>/dev/null; then
+      sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" "$f"
+      echo -e "${GREEN}  - Обновлён файл:${RESET} $f"
+      grep -n "Host(\`" "$f" || true
+      changed=1
+    fi
+  done
+
+  if [ "$changed" -eq 0 ]; then
+    echo -e "${YELLOW}[!] Внимание: ни в одном из traefik/*.yml не найдено Host(\`...\`). Нечего обновлять.${RESET}"
   fi
 }
 
+# 5.1. Жёсткий перезапуск стека Docker
+restart_stack() {
+  echo -e "${YELLOW}[*] Полный перезапуск docker compose (down + up --build)...${RESET}"
+  docker compose down
+  docker compose up -d --build
+}
+
+write_env
 update_traefik_host
 
 # 6. Первый запуск docker compose
-echo -e "${YELLOW}[*] Запускаю docker compose up -d --build...${RESET}"
-docker compose up -d --build
+echo -e "${YELLOW}[*] Запускаю docker compose (полный перезапуск)...${RESET}"
+restart_stack
 
 echo
 echo "Проверь контейнеры:"
@@ -252,8 +269,8 @@ else
   echo "  2) Указывает ли A-запись домена на IP этого сервера"
   echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
   echo
-  echo "Логи Traefik по ACME/Let's Encrypt:"
-  echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
+  echo -e "${YELLOW}Текущие логи Traefik по ACME/Let's Encrypt (последние 20 строк):${RESET}"
+  docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 20 || true
   echo
 
   read -rp "Изменить домен и e-mail и попробовать снова? [y/N]: " RETRY
@@ -283,14 +300,17 @@ else
       write_env
       update_traefik_host
 
-      echo -e "${YELLOW}[*] Перезапускаю docker compose с новыми параметрами домена...${RESET}"
-      docker compose up -d
+      echo -e "${YELLOW}[*] Перезапускаю docker compose с новыми параметрами домена (full recreate)...${RESET}"
+      restart_stack
 
       CERT_OK=$(check_https_once "$DOMAIN")
       if [ "$CERT_OK" -eq 1 ]; then
         echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
       else
         echo -e "${RED}[!] Даже после изменения домена/e-mail не удалось подтвердить работу HTTPS.${RESET}"
+        echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 20 строк):${RESET}"
+        docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 20 || true
+        echo
         echo "Проверь DNS, настройки домена и логи Traefik:"
         echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
       fi
@@ -304,7 +324,7 @@ fi
 # 6.2. Краткий отчёт о статусе импорта базы по логам hockey-api
 if [ "$DB_MODE" != "none" ]; then
   echo
-  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"
+  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"`
   IMPORT_LOG=$(docker logs hockey-api 2>/dev/null | grep -E "Импорт ZIP" | tail -n 1 || true)
 
   if echo "$IMPORT_LOG" | grep -qi "успеш"; then
@@ -312,7 +332,7 @@ if [ "$DB_MODE" != "none" ]; then
     echo "    ${DB_SOURCE}"
     echo -e "${GREEN}    завершился УСПЕШНО.${RESET}"
   elif echo "$IMPORT_LOG" | grep -qi "ошибк"; then
-    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"
+    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"`
     echo "    Последняя строка:"
     echo "    $IMPORT_LOG"
     echo
@@ -367,4 +387,3 @@ echo "     - API-ключ: (тот, который записал)"
 echo "  3) Проверь синхронизацию."
 echo
 echo -e "${GREEN}=== Установка завершена ===${RESET}"
-echo
