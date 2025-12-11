@@ -243,10 +243,12 @@ echo
 
 check_https_once() {
   local dom="$1"
-  echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}"
+  # Информационная строка в stderr, чтобы не мешать возвращаемому значению
+  echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}" >&2
+
   local ok=0
-  for i in $(seq 1 12); do
-    # Не используем -k: если сертификат самоподписанный или недоверенный, curl упадёт
+  # даём до 24 попыток (до ~2 минут с паузами)
+  for i in $(seq 1 24); do
     if curl -sS --max-time 5 "https://$dom/" -o /dev/null; then
       ok=1
       break
@@ -324,7 +326,7 @@ fi
 # 6.2. Краткий отчёт о статусе импорта базы по логам hockey-api
 if [ "$DB_MODE" != "none" ]; then
   echo
-  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"`
+  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"
   IMPORT_LOG=$(docker logs hockey-api 2>/dev/null | grep -E "Импорт ZIP" | tail -n 1 || true)
 
   if echo "$IMPORT_LOG" | grep -qi "успеш"; then
@@ -332,7 +334,7 @@ if [ "$DB_MODE" != "none" ]; then
     echo "    ${DB_SOURCE}"
     echo -e "${GREEN}    завершился УСПЕШНО.${RESET}"
   elif echo "$IMPORT_LOG" | grep -qi "ошибк"; then
-    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"`
+    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"
     echo "    Последняя строка:"
     echo "    $IMPORT_LOG"
     echo
@@ -351,7 +353,7 @@ echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
 
 if [ -n "$API_KEY" ]; then
   echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
-  echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
+  echo -е "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
   echo
   echo -e "  ${BOLD}API-ключ:${RESET} $API_KEY"
   echo
