@@ -401,6 +401,29 @@ if [ "$DB_MODE" != "none" ]; then
   fi
 fi
 
+# --- Надёжная проверка по структуре базы ---
+echo
+echo -e "${YELLOW}[*] Выполняю структурную проверку импортированной базы...${RESET}"
+
+DATA_PATH="/var/lib/docker/volumes/${COMPOSE_PROJECT_NAME}_hockey-data/_data"
+
+if [ -f "${DATA_PATH}/finished/index.json" ]; then
+    echo -e "${GREEN}[+] Импорт базы подтверждён: найден файл finished/index.json.${RESET}"
+    echo -e "${GREEN}    База данных успешно восстановлена и готова к использованию.${RESET}"
+else
+    echo -e "${RED}[!] Импорт базы НЕ обнаружен: файл finished/index.json отсутствует.${RESET}"
+    echo "    Возможные причины:"
+    echo "      - неверный DB_IMPORT_SOURCE"
+    echo "      - недоступен источник ZIP"
+    echo "      - ошибка при импорте внутри hockey-api"
+    echo
+    echo "Проверь вручную содержимое каталога:"
+    echo "  ls -R ${DATA_PATH}"
+    echo
+fi
+# --- Конец проверки ---
+
+
 # 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
 echo
 echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
