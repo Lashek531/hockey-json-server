@@ -1,18 +1,15 @@
 
 FROM debian:12-slim
 
-# Базовые утилиты + cron + Python/pip для awscli
+# Базовые утилиты + cron + awscli (через apt)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         cron \
-        python3 \
-        python3-pip && \
+        awscli && \
     rm -rf /var/lib/apt/lists/*
 
-# Устанавливаем AWS CLI (будем работать с Selectel через него)
-RUN pip3 install --no-cache-dir awscli
 
 # Скрипт бэкапа и crontab
 COPY backup.sh /usr/local/bin/backup.sh
