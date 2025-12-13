@@ -48,6 +48,16 @@ services:
     networks:
       - web
 
+  hockey-backup:
+    build: ./backup
+    env_file:
+      - .env
+    depends_on:
+      - hockey-api
+    networks:
+      - web
+    restart: unless-stopped
+
 volumes:
   hockey-data:
   traefik-letsencrypt:
