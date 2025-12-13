@@ -26,7 +26,9 @@ AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}" \
 AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}" \
 AWS_DEFAULT_REGION="${S3_REGION}" \
 aws s3 cp "${TMP_FILE}" "${S3_URL}" \
-  --endpoint-url "https://${S3_ENDPOINT}"
+  --endpoint-url "https://${S3_ENDPOINT}" \
+  --no-verify-ssl
+
 
 echo "[backup] Upload successful."
 
