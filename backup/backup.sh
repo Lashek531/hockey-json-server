@@ -1,10 +1,9 @@
-
 #!/usr/bin/env bash
 set -e
 
-echo "[backup] Запуск бэкапа $(date)"
+echo "[backup] Backup started at $(date)"
 
-# Проверяем обязательные переменные
+# Check required environment variables
 : "${S3_ENDPOINT:?S3_ENDPOINT is required}"
 : "${S3_REGION:?S3_REGION is required}"
 : "${S3_BUCKET:?S3_BUCKET is required}"
@@ -15,13 +14,13 @@ echo "[backup] Запуск бэкапа $(date)"
 DATE_STR="$(date +%F)"   # YYYY-MM-DD
 TMP_FILE="/tmp/hockey-db-${DATE_STR}.zip"
 
-# 1. Скачиваем архив базы с hockey-api по внутреннему адресу Docker-сети
-echo "[backup] Скачиваю архив базы с hockey-api..."
+# 1. Download DB archive from hockey-api via internal Docker network
+echo "[backup] Downloading DB archive from hockey-api..."
 curl -fSL "http://hockey-api:5001/api/download-db" -o "${TMP_FILE}"
 
-# 2. Загружаем в Selectel S3
+# 2. Upload to Selectel S3 using awscli
 S3_URL="s3://${S3_BUCKET}/${S3_PREFIX}hockey-db-${DATE_STR}.zip"
-echo "[backup] Загружаю архив в ${S3_URL}..."
+echo "[backup] Uploading archive to ${S3_URL}..."
 
 AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}" \
 AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}" \
@@ -29,9 +28,9 @@ AWS_DEFAULT_REGION="${S3_REGION}" \
 aws s3 cp "${TMP_FILE}" "${S3_URL}" \
   --endpoint-url "https://${S3_ENDPOINT}"
 
-echo "[backup] Успешно загружено."
+echo "[backup] Upload successful."
 
-# 3. Удаляем временный файл
+# 3. Remove temporary file
 rm -f "${TMP_FILE}"
 
-echo "[backup] Бэкап завершён."
+echo "[backup] Backup finished."
