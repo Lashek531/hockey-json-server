@@ -42,7 +42,7 @@ fi
 
 echo
 
-# 2.1. Определяем публичный IP этого сервера (для проверки правильности A-записи домена)
+# 2.1. Определяем публичный IP этого сервера (для проверки A-записи домена)
 SERVER_IP=""
 if command -v curl >/dev/null 2>&1; then
   SERVER_IP=$(curl -s https://ifconfig.me 2>/dev/null || curl -s https://api.ipify.org 2>/dev/null || echo "")
@@ -54,9 +54,12 @@ else
   echo -e "${YELLOW}[!] Не удалось автоматически определить публичный IP сервера. Проверка A-записи домена будет поверхностной.${RESET}"
 fi
 
+# Вспомогательное: имя compose-проекта (если не задано явно)
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}"
+VOLUME_NAME="${PROJECT_NAME}_hockey-data"
+
 # 3. Параметры инсталляции
 echo -e "${BOLD}=== Параметры инсталляции ===${RESET}"
-
 echo
 echo "Домен (FQDN) — имя, на которое указывает A-запись DNS этого сервера."
 echo "Примеры: hockey.example.com, test-server.pestovo328.ru"
@@ -87,23 +90,14 @@ echo "  3) Импорт по HTTP/HTTPS (download-db с другого серв�
 read -rp "Режим импорта [1]: " DB_MODE_CHOICE
 
 case "$DB_MODE_CHOICE" in
-  2)
-    DB_MODE="local"
-    ;;
-  3)
-    DB_MODE="url"
-    ;;
-  ""|1)
-    DB_MODE="none"
-    ;;
+  2) DB_MODE="local" ;;
+  3) DB_MODE="url" ;;
+  ""|1) DB_MODE="none" ;;
   *)
     echo -e "${YELLOW}Неизвестный выбор, будет использован режим 'none'.${RESET}"
     DB_MODE="none"
     ;;
 esac
-
-DB_SOURCE=""
-
 
 DB_SOURCE=""
 
@@ -160,7 +154,8 @@ elif [ "$DB_MODE" = "url" ]; then
 
       echo -e "${YELLOW}[*] Проверяю доступность: $SRC ...${RESET}"
 
-      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 12 "$SRC" || echo "000")
+      # -L: следовать редиректам, -k: не валиться на self-signed, -m: таймаут
+      HTTP_CODE=$(curl -s -L -k -o /dev/null -w "%{http_code}" -m 15 "$SRC" || echo "000")
 
       if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
         echo -e "${GREEN}URL доступен (HTTP $HTTP_CODE). Импорт будет выполнен.${RESET}"
@@ -237,16 +232,13 @@ EOF
   echo
 }
 
-
 # 5. Обновляем traefik/*.yml под домен
 update_traefik_host() {
   echo -e "${YELLOW}[*] Обновляю traefik/*.yml под домен ${DOMAIN}...${RESET}"
 
   local changed=0
-
   for f in traefik/*.yml; do
     [ -f "$f" ] || continue
-
     if grep -q "Host(\`" "$f" 2>/dev/null; then
       sed -i "s/Host(\`[^\\\`]*\`)/Host(\`$DOMAIN\`)/g" "$f"
       echo -e "${GREEN}  - Обновлён файл:${RESET} $f"
@@ -260,19 +252,42 @@ update_traefik_host() {
   fi
 }
 
-# 5.1. Жёсткий перезапуск стека Docker
+# Ожидание, пока контейнер существует в docker (после up)
+wait_container() {
+  local name="$1"
+  local tries=40
+  while [ "$tries" -gt 0 ]; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+      return 0
+    fi
+    sleep 0.5
+    tries=$((tries-1))
+  done
+  return 1
+}
+
+# 5.1. Полный перезапуск стека Docker + (если выбран импорт) принудительный запуск импорта
 restart_stack() {
   echo -e "${YELLOW}[*] Полный перезапуск docker compose (down + up --build)...${RESET}"
   docker compose down
   docker compose up -d --build
-  # Если выбран импорт — сбрасываем флаг инициализации, чтобы импорт точно стартовал.
-if [ "$DB_MODE" != "none" ]; then
-  echo -e "${YELLOW}[*] Выбран импорт базы: сбрасываю флаг /var/www/hockey-json/.initialized...${RESET}"
-  docker exec -it hockey-api sh -lc 'rm -f /var/www/hockey-json/.initialized || true'
-  echo -e "${YELLOW}[*] Перезапускаю hockey-api для выполнения импорта...${RESET}"
-  docker compose restart hockey-api
-fi
 
+  # Если выбран импорт — сбрасываем флаг инициализации, чтобы импорт точно стартовал.
+  if [ "$DB_MODE" != "none" ]; then
+    echo -e "${YELLOW}[*] Выбран импорт базы: сбрасываю флаг /var/www/hockey-json/.initialized...${RESET}"
+
+    if ! wait_container "hockey-api"; then
+      echo -e "${RED}[!] Контейнер hockey-api не появился после запуска. Проверь docker compose ps.${RESET}"
+      return 1
+    fi
+
+    docker exec -it hockey-api sh -lc 'rm -f /var/www/hockey-json/.initialized || true'
+    echo -e "${YELLOW}[*] Перезапускаю hockey-api для выполнения импорта...${RESET}"
+    docker compose restart hockey-api
+
+    # даём entrypoint начать работу
+    sleep 2
+  fi
 }
 
 write_env
@@ -290,10 +305,9 @@ echo
 check_https_once() {
   local dom="$1"
 
-  # Сообщение пользователю — в stderr, чтобы не мешать возвращаемому значению
   echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}" >&2
 
-  # 6.0. Проверяем, что домен указывает на IP этого сервера
+  # Проверяем A-запись домена
   if [ -n "$SERVER_IP" ]; then
     local dom_ip
     dom_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk 'NR==1 {print $1}' || true)
@@ -313,9 +327,11 @@ check_https_once() {
   fi
 
   local ok=0
-  # даём до 24 попыток (до ~2 минут с паузами)
-  for i in $(seq 1 24); do
-    if curl -sS --max-time 5 "https://$dom/" -o /dev/null; then
+  # даём до 24 попыток (~2 минуты)
+  for _ in $(seq 1 24); do
+    # Важно: если сертификат ещё self-signed, curl без -k падает.
+    # Здесь проверяем сам факт доступности HTTPS, а не доверие.
+    if curl -sS -k --max-time 5 "https://$dom/" -o /dev/null; then
       ok=1
       break
     fi
@@ -324,13 +340,13 @@ check_https_once() {
   echo "$ok"
 }
 
-# 6.1. Первая проверка HTTPS
+# 6.1. Проверка HTTPS
 CERT_OK=$(check_https_once "$DOMAIN")
 
 if [ "$CERT_OK" -eq 1 ]; then
-  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
+  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ доступен.${RESET}"
 else
-  echo -e "${RED}[!] Не удалось подтвердить работу HTTPS для https://$DOMAIN/ в отведённое время.${RESET}"
+  echo -e "${RED}[!] Не удалось подтвердить доступность HTTPS для https://$DOMAIN/ в отведённое время.${RESET}"
   echo
   echo -e "${YELLOW}Проверь, пожалуйста:${RESET}"
   echo "  1) Правильно ли введён домен: $DOMAIN"
@@ -341,8 +357,8 @@ else
   fi
   echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
   echo
-  echo -e "${YELLOW}Текущие логи Traefik по ACME/Let's Encrypt (последние 20 строк):${RESET}"
-  docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 20 || true
+  echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 30 строк):${RESET}"
+  docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 30 || true
   echo
 
   read -rp "Изменить домен и e-mail и попробовать снова? [y/N]: " RETRY
@@ -368,7 +384,6 @@ else
       echo "  E-mail: $ACME_EMAIL"
       echo
 
-      # Перезаписываем .env с новым доменом и e-mail (API_KEY / DB_* сохраняются)
       write_env
       update_traefik_host
 
@@ -377,11 +392,11 @@ else
 
       CERT_OK=$(check_https_once "$DOMAIN")
       if [ "$CERT_OK" -eq 1 ]; then
-        echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ работает, сертификат принят клиентом.${RESET}"
+        echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ доступен.${RESET}"
       else
-        echo -e "${RED}[!] Даже после изменения домена/e-mail не удалось подтвердить работу HTTPS.${RESET}"
-        echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 20 строк):${RESET}"
-        docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 20 || true
+        echo -e "${RED}[!] Даже после изменения домена/e-mail не удалось подтвердить доступность HTTPS.${RESET}"
+        echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 30 строк):${RESET}"
+        docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 30 || true
         echo
         echo "Проверь DNS, настройки домена и логи Traefik:"
         echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
@@ -393,52 +408,37 @@ else
   esac
 fi
 
-# 6.2. Краткий отчёт о статусе импорта базы по логам hockey-api
-if [ "$DB_MODE" != "none" ]; then
-  echo
-  echo -e "${YELLOW}[*] Проверяю статус импорта базы по логам hockey-api...${RESET}"
-  IMPORT_LOG=$(docker logs hockey-api 2>/dev/null | grep -E "Импорт ZIP" | tail -n 1 || true)
-
-  if echo "$IMPORT_LOG" | grep -qi "успеш"; then
-    echo -e "${GREEN}[+] Импорт базы данных (режим ${DB_MODE}) из источника:${RESET}"
-    echo "    ${DB_SOURCE}"
-    echo -e "${GREEN}    завершился УСПЕШНО.${RESET}"
-  elif echo "$IMPORT_LOG" | grep -qi "ошибк"; then
-    echo -e "${RED}[!] В логах hockey-api есть сообщение об ошибке при импорте базы.${RESET}"
-    echo "    Последняя строка:"
-    echo "    $IMPORT_LOG"
-    echo
-    echo "Рекомендуется проверить логи подробнее:"
-    echo "  docker logs hockey-api | grep 'Импорт ZIP' -n"
-  else
-    echo -e "${YELLOW}[?] Не удалось однозначно определить статус импорта по логам hockey-api.${RESET}"
-    echo "При необходимости выполни:"
-    echo "  docker logs hockey-api | grep 'Импорт ZIP' -н"
-  fi
-fi
-
-# --- Надёжная проверка по структуре базы ---
+# 6.2. Надёжная проверка базы (истина) — по /var/www/hockey-json/index.json внутри контейнера
 echo
-echo -e "${YELLOW}[*] Выполняю структурную проверку импортированной базы...${RESET}"
+echo -e "${YELLOW}[*] Проверяю наличие базы по корневому index.json...${RESET}"
 
-DATA_PATH="/var/lib/docker/volumes/${COMPOSE_PROJECT_NAME}_hockey-data/_data"
+if docker exec -it hockey-api sh -lc '[ -s /var/www/hockey-json/index.json ]'; then
+  echo -e "${GREEN}[+] База обнаружена: /var/www/hockey-json/index.json существует и не пустой.${RESET}"
 
-if [ -f "${DATA_PATH}/finished/index.json" ]; then
-    echo -e "${GREEN}[+] Импорт базы подтверждён: найден файл finished/index.json.${RESET}"
-    echo -e "${GREEN}    База данных успешно восстановлена и готова к использованию.${RESET}"
+  CUR_SEASON=$(docker exec -it hockey-api sh -lc 'python -c "import json; print(json.load(open(\"/var/www/hockey-json/index.json\",\"r\",encoding=\"utf-8\")).get(\"currentSeason\",\"\"))" 2>/dev/null' | tr -d '\r' || true)
+  if [ -n "$CUR_SEASON" ]; then
+    echo -e "${GREEN}    currentSeason:${RESET} $CUR_SEASON"
+  fi
 else
-    echo -e "${RED}[!] Импорт базы НЕ обнаружен: файл finished/index.json отсутствует.${RESET}"
-    echo "    Возможные причины:"
-    echo "      - неверный DB_IMPORT_SOURCE"
-    echo "      - недоступен источник ZIP"
-    echo "      - ошибка при импорте внутри hockey-api"
-    echo
-    echo "Проверь вручную содержимое каталога:"
-    echo "  ls -R ${DATA_PATH}"
-    echo
+  echo -e "${RED}[!] База НЕ обнаружена: /var/www/hockey-json/index.json отсутствует или пустой.${RESET}"
+  echo
+  echo -e "${YELLOW}Диагностика (последние 200 строк hockey-api):${RESET}"
+  docker logs hockey-api --tail=200 || true
+  echo
+  echo -e "${YELLOW}Содержимое /var/www/hockey-json внутри контейнера:${RESET}"
+  docker exec -it hockey-api ls -la /var/www/hockey-json || true
 fi
-# --- Конец проверки ---
 
+# 6.3. Подсказка: где физически лежит volume (для WinSCP)
+echo
+echo -e "${YELLOW}[*] Где лежит база на хосте (для WinSCP):${RESET}"
+if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+  MP=$(docker volume inspect "$VOLUME_NAME" --format '{{.Mountpoint}}' | tr -d '\r')
+  echo -e "  Volume: ${BOLD}${VOLUME_NAME}${RESET}"
+  echo -e "  Mountpoint: ${BOLD}${MP}${RESET}"
+else
+  echo -e "${YELLOW}[!] Volume ${VOLUME_NAME} не найден. Проверь docker volume ls.${RESET}"
+fi
 
 # 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
 echo
