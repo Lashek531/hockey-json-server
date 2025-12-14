@@ -214,6 +214,13 @@ echo
 # 4. Генерация .env
 write_env() {
   echo -e "${YELLOW}[*] Записываю .env...${RESET}"
+
+  # Если выбран импорт базы (local/url) — значит сознательно перезатираем текущую базу.
+  local FORCE_RESET="false"
+  if [ "$DB_MODE" != "none" ]; then
+    FORCE_RESET="true"
+  fi
+
   cat > .env <<EOF
 UPLOAD_API_KEY=${API_KEY}
 
@@ -222,13 +229,14 @@ TRAEFIK_ACME_EMAIL=${ACME_EMAIL}
 
 DB_IMPORT_MODE=${DB_MODE}
 DB_IMPORT_SOURCE=${DB_SOURCE}
-DB_FORCE_RESET=false
+DB_FORCE_RESET=${FORCE_RESET}
 EOF
 
   echo "[*] Содержимое .env:"
   cat .env
   echo
 }
+
 
 # 5. Обновляем traefik/*.yml под домен
 update_traefik_host() {
