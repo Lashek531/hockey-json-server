@@ -265,6 +265,14 @@ restart_stack() {
   echo -e "${YELLOW}[*] Полный перезапуск docker compose (down + up --build)...${RESET}"
   docker compose down
   docker compose up -d --build
+  # Если выбран импорт — сбрасываем флаг инициализации, чтобы импорт точно стартовал.
+if [ "$DB_MODE" != "none" ]; then
+  echo -e "${YELLOW}[*] Выбран импорт базы: сбрасываю флаг /var/www/hockey-json/.initialized...${RESET}"
+  docker exec -it hockey-api sh -lc 'rm -f /var/www/hockey-json/.initialized || true'
+  echo -e "${YELLOW}[*] Перезапускаю hockey-api для выполнения импорта...${RESET}"
+  docker compose restart hockey-api
+fi
+
 }
 
 write_env
