@@ -1,461 +1,327 @@
 # Hockey JSON Server
 
-Производственный backend для любительского хоккейного табло:
+Производственный backend для любительского хоккейного табло и экосистемы вокруг него
+(Android-приложение, Telegram-бот, web-viewer и т. д.).
 
-- **hockey-api** — Flask + gunicorn, принимает JSON от Android-приложения, Telegram-бота и т. д.
-- **hockey-nginx** — раздаёт готовые JSON-файлы и проксирует `/api/...` в `hockey-api`.
-- **Traefik** — фронтовой reverse-proxy с HTTPS и поддержкой Let's Encrypt.
-- **hockey-data** — volume с базой JSON-файлов (`/var/www/hockey-json`).
+Сервер принимает JSON-данные, хранит их в файловой базе и автоматически
+пересобирает индексы и статистику.
 
-Проект упакован в Docker и готов к развёртыванию на любом VPS командой:
+---
 
-```bash
-docker compose up -d --build
-Полная спецификация форматов JSON вынесена в отдельный файл: SPEC_JSON.md.
+## 1. Архитектура
 
-1. Архитектура и компоненты
-1.1. Контейнеры
-hockey-api
+### 1.1. Основные компоненты
 
-Образ собирается из Dockerfile.
+* **hockey-api**
+  Flask + gunicorn.
+  Принимает все `/api/...` запросы, пишет данные в файловую базу.
 
-Приложение Flask + gunicorn.
+* **hockey-nginx**
+  `nginx:1.27-alpine`.
+  Раздаёт JSON-файлы как статические и проксирует `/api/...` → `hockey-api:5001`.
 
-Хранит/читает данные из /var/www/hockey-json.
+* **Traefik**
+  `traefik:v3.1`.
+  Front reverse-proxy, HTTPS, автоматические сертификаты Let’s Encrypt.
 
-Автоматически:
+* **hockey-data (Docker volume)**
+  Монтируется как `/var/www/hockey-json`.
+  Содержит всю базу данных проекта.
 
-генерирует API-ключ, если он не задан;
+---
 
-при первом старте может импортировать базу из ZIP (локальный путь или URL);
+## 2. Структура данных
 
-пересчитывает индексы через scripts/rebuild_indexes.py.
+База всегда находится в:
 
-hockey-nginx
+```
+/var/www/hockey-json/
+```
 
-Образ: nginx:1.27-alpine.
+Краткая структура:
 
-Конфиг: docker/nginx/hockey-json.conf.
-
-Раздаёт содержимое /var/www/hockey-json как статические файлы.
-
-Проксирует все location /api/ в сервис hockey-api:5001.
-
-traefik
-
-Образ: traefik:v3.1.
-
-Слушает порты 80 и 443 на хосте.
-
-Использует конфиг traefik/traefik.yml и файл acme.json для хранения сертификатов.
-
-Может автоматически получать TLS-сертификаты Let’s Encrypt (при наличии домена).
-
-Volume hockey-data
-
-Мапится как /var/www/hockey-json во всех контейнерах.
-
-Содержит все JSON-файлы табло (игры, индексы, статистику, настройки и т. д.).
-
-1.2. Структура данных в /var/www/hockey-json
-Подробно форматы описаны в SPEC_JSON.md. Кратко:
-
-text
-Копировать код
+```
 /var/www/hockey-json/
   index.json                  # корневой индекс сезонов
-  active_game.json            # активная/последняя игра
-  incoming/                   # "чёрный ящик" upload-json
+  active_game.json            # активная игра
+  incoming/                   # универсальный приём любых JSON
   finished/
     <season>/
       index.json              # индекс завершённых игр сезона
       <gameId>.json           # протокол конкретной игры
   stats/
     <season>/
-      players.json            # статистика игроков по сезону
+      players.json            # статистика игроков сезона
   rosters/
-    roster.json               # актуальный ростер на ближайшую игру
+    roster.json               # составы на ближайшую игру
   settings/
     app_settings.json         # настройки приложения
   base_roster/
     base_players.json         # базовый список игроков + рейтинг
-2. Структура репозитория
-text
-Копировать код
+```
+
+**Форматы всех JSON подробно описаны в `SPEC_JSON.md`.**
+
+---
+
+## 3. Структура репозитория
+
+```
 hockey-json-server/
   app/
-    __init__.py              # create_app()
-    config.py                # конфигурация (BASE_DIR, UPLOAD_API_KEY)
-    upload_api.py            # Flask-приложение с API эндпоинтами
-    api/
-      __init__.py
-      routes.py              # (на будущее, для расширения API)
+    config.py                 # BASE_DIR, UPLOAD_API_KEY
+    upload_api.py             # все API-эндпоинты
   scripts/
-    __init__.py
-    rebuild_indexes.py       # пересборка индексов и статистики
-    import_db.py             # импорт базы из ZIP (файл или URL)
+    import_db.py              # импорт базы из ZIP
+    rebuild_indexes.py        # пересборка индексов и статистики
   docker/
-    nginx/
-      hockey-json.conf       # конфиг nginx внутри контейнера
+    nginx/hockey-json.conf
   traefik/
-    traefik.yml              # конфиг Traefik (file provider)
-  Dockerfile                 # образ hockey-api
-  docker-compose.yml         # весь стек: traefik + nginx + api + volume
-  requirements.txt           # Python-зависимости
-  SPEC_JSON.md               # спецификация всех JSON-форматов
-  README.md                  # этот файл
-  .env.example               # пример env-переменных
-  .gitignore
-3. Требования
-VPS или сервер с:
+    traefik.yml
+  Dockerfile
+  docker-compose.yml
+  requirements.txt
+  SPEC_JSON.md
+  README.md
+  .env.example
+```
 
-Docker Engine
+---
 
-Docker Compose v2 (docker compose)
+## 4. Требования
 
-Пример проверки:
+* Linux VPS
+* Docker Engine
+* Docker Compose v2
 
-bash
-Копировать код
+Проверка:
+
+```bash
 docker --version
 docker compose version
-4. Быстрый старт (развёртывание на новом сервере)
-4.1. Клонирование репозитория
-bash
-Копировать код
+```
+
+---
+
+## 5. Развёртывание (production)
+
+### 5.1. Клонирование
+
+```bash
 git clone https://github.com/your-user/hockey-json-server.git
 cd hockey-json-server
-(Адрес репозитория подставьте свой.)
+```
 
-4.2. Настройка .env
-Создайте файл .env на основе .env.example:
+---
 
-bash
-Копировать код
-cp .env.example .env
-nano .env
-Важные переменные:
+### 5.2. Установка через install.sh (рекомендуется)
 
-dotenv
-Копировать код
-# Фиксированный API-ключ для всех /api/... эндпоинтов.
-# Можно оставить пустым — при первом старте контейнер сгенерирует случайный ключ
-# и выведет его в лог. Для production лучше задать руками.
-UPLOAD_API_KEY=CHANGE_ME_TO_STRONG_KEY
+В репозитории используется **интерактивный install.sh**, который:
 
-# E-mail для Let’s Encrypt (обязателен, если будете использовать реальный домен).
-TRAEFIK_ACME_EMAIL=admin@example.com
+* устанавливает Docker;
+* проверяет DNS и IP;
+* настраивает Traefik;
+* **ждёт реального выпуска сертификата Let’s Encrypt**;
+* инициализирует базу.
 
-# Режим импорта базы при первом старте:
-#   none  - не импортировать (создать пустую структуру /var/www/hockey-json)
-#   local - импортировать из локального файла внутри контейнера (см. ниже)
-#   url   - импортировать по HTTP/HTTPS URL
-DB_IMPORT_MODE=none
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
 
-# Источник базы:
-#   при DB_IMPORT_MODE=local: путь внутри контейнера, например: /hockey-db.zip
-#   при DB_IMPORT_MODE=url:   полный URL, например: https://example.com/hockey-db.zip
-DB_IMPORT_SOURCE=
+По итогам установки скрипт **обязательно выводит**:
 
-# Если true — при старте принудительно переинициализировать базу (перезаписать существующую).
-DB_FORCE_RESET=false
-Для начала можно оставить:
+* базовый URL сервера;
+* API-ключ;
+* путь к volume базы.
 
-dotenv
-Копировать код
-UPLOAD_API_KEY=мой_секретный_ключ
-DB_IMPORT_MODE=none
-DB_IMPORT_SOURCE=
-DB_FORCE_RESET=false
-4.3. Запуск всего стека
-bash
-Копировать код
-docker compose up -d --build
-Проверка состояния:
+---
 
-bash
-Копировать код
-docker compose ps
-Ожидаемые сервисы:
+### 5.3. Вводимые данные при установке
 
-traefik (порты 80/443)
+| Параметр    | Пример                                        |
+| ----------- | --------------------------------------------- |
+| Домен       | hockey-server.pestovo328.ru                   |
+| ACME E-mail | [admin@example.com](mailto:admin@example.com) |
+| API-ключ    | 3vXjhEr1YvFzgL6gO2fc_                         |
 
-hockey-nginx
+---
 
-hockey-api
+## 6. Доступ к API
 
-4.4. Получение API-ключа и статуса инициализации
-Если UPLOAD_API_KEY в .env оставили пустым, контейнер сгенерирует ключ автоматически. Узнать его можно так:
+### 6.1. Базовый URL
 
-bash
-Копировать код
-docker logs hockey-api | grep "API Key" | tail -n 1
-Пример вывода:
+Рекомендуемый вариант:
 
-text
-Копировать код
-API Key: hockey_0za1ZJNyOgzy19KzeS28Q4MJ_KEY
-Этот ключ обязательно нужно использовать в заголовке X-Api-Key для всех запросов к /api/....
+```
+https://<DOMAIN>/api/...
+```
 
-5. Доступ к API
-5.1. Базовый URL
-Варианты:
+Все примеры ниже используют HTTPS и домен.
 
-При обращении по IP:
+---
 
-HTTP: http://<SERVER_IP>/api/...
+### 6.2. Авторизация
 
-HTTPS: https://<SERVER_IP>/api/... (Traefik выдаёт свой self-signed сертификат, можно использовать -k в curl).
+Все `/api/...` эндпоинты требуют заголовок:
 
-При наличии домена (рекомендуется для Let’s Encrypt):
-
-HTTP: http://your-domain/api/...
-
-HTTPS: https://your-domain/api/... (Traefik автоматически получит сертификат Let’s Encrypt при валидной DNS-записи и открытых портах 80/443).
-
-5.2. Авторизация
-Все эндпоинты /api/... принимают простой API-ключ:
-
-http
-Копировать код
+```
 X-Api-Key: <UPLOAD_API_KEY>
-При неверном или отсутствующем ключе — ответ 401 Unauthorized.
+```
 
-5.3. Пример запроса upload-json (через Traefik)
-bash
-Копировать код
-API_KEY="ВАШ_API_КЛЮЧ"
-SERVER="your-domain-or-ip"
+При отсутствии или неверном ключе сервер возвращает `401 Unauthorized`.
 
-curl -k "https://$SERVER/api/upload-json" \
-  -H "Content-Type: application/json" \
-  -H "X-Api-Key: $API_KEY" \
-  -d '{"test": "hello", "source": "curl"}'
-Ответ:
+---
 
-json
-Копировать код
-{"status":"ok","file":"2025-12-08T...json"}
-Файл будет сохранён в /var/www/hockey-json/incoming.
+## 7. Основные API-эндпоинты
 
-6. Жизненный цикл базы и auto-import
-База хранится в volume hockey-data и монтируется в контейнеры как /var/www/hockey-json.
+### 7.1. Универсальный приём JSON
 
-6.1. Поведение при первом старте
-Скрипт entrypoint.sh в контейнере hockey-api делает:
+**POST** `/api/upload-json`
 
-Определяет BASE_DIR (по умолчанию /var/www/hockey-json).
+Сохраняет любой JSON в `incoming/`.
 
-Если файла BASE_DIR/.initialized нет:
+---
 
-читает DB_IMPORT_MODE и DB_IMPORT_SOURCE;
+### 7.2. Активная игра
 
-если:
+**POST** `/api/upload-active-game`
 
-DB_IMPORT_MODE=local и DB_IMPORT_SOURCE задан → вызывает
-python /app/scripts/import_db.py <локальный_путь>;
+Сохраняет `active_game.json`.
 
-DB_IMPORT_MODE=url и DB_IMPORT_SOURCE задан → вызывает
-python /app/scripts/import_db.py <URL>;
+---
 
-иначе (none или пустые значения) оставляет базу пустой;
+### 7.3. Корневой индекс
 
-после успешной инициализации создаёт флаг BASE_DIR/.initialized.
+**POST** `/api/upload-root-index`
 
-Если .initialized уже существует:
+Сохраняет `index.json`.
 
-база считается инициализированной и не трогается;
+---
 
-если при этом DB_FORCE_RESET=true, то импорт выполняется заново.
+### 7.4. Статистика игроков сезона
 
-6.2. Скрипт import_db.py
-Поддерживает два сценария:
+**POST** `/api/upload-players-stats`
 
-Импорт из локального файла внутри контейнера:
+Сохраняет:
 
-bash
-Копировать код
-python /app/scripts/import_db.py /path/to/hockey-db.zip
-Импорт по HTTP/HTTPS URL:
-
-bash
-Копировать код
-python /app/scripts/import_db.py https://example.com/hockey-db.zip
-Во всех случаях скрипт:
-
-очищает содержимое BASE_DIR;
-
-распаковывает hockey-json/ из ZIP внутрь BASE_DIR;
-
-запускает rebuild_indexes.py, который:
-
-по всем сезонам пересчитывает:
-
-finished/<season>/index.json
-
+```
 stats/<season>/players.json
+```
 
-пересобирает корневой /var/www/hockey-json/index.json.
+---
 
-7. Миграция со старого сервера (пример)
-7.1. Шаг 1. Выгрузить базу со старого сервера
-На старом сервере с работающим API:
+### 7.5. Базовый список игроков (ключевой для рейтингов)
 
-bash
-Копировать код
-OLD_API_KEY="старый_ключ"
-OLD_BASE="https://old-host-or-ip:8443"
+**POST** `/api/upload-base-roster`
 
-curl -k -H "X-Api-Key: $OLD_API_KEY" \
-  "$OLD_BASE/api/download-db" \
-  --output hockey-db.zip
-Полученный hockey-db.zip содержит:
+Сохраняет:
 
-text
-Копировать код
-hockey-json/db_info.json
-hockey-json/<всё содержимое старого BASE_DIR>
-7.2. Вариант A: ручной импорт через docker cp
-Скопировать hockey-db.zip на новый сервер (scp/rsync).
+```
+base_roster/base_players.json
+```
 
-На новом сервере:
+#### ВАЖНО
 
-bash
-Копировать код
-cd /opt/hockey-json-server
+* **full_name является основным идентификатором игрока**.
+* Все внешние системы (включая Telegram-бота) **обязаны передавать full_name**.
+* `user_id` может отсутствовать или меняться.
 
-# Убедиться, что стек запущен
-docker compose up -d
+Пример:
 
-# Скопировать архив внутрь контейнера hockey-api
-docker cp hockey-db.zip hockey-api:/hockey-db.zip
+```json
+{
+  "version": 1,
+  "updatedAt": "2025-12-15T12:00:00",
+  "players": [
+    {
+      "user_id": 1030619743,
+      "full_name": "Алексеев Глеб",
+      "role": "uni",
+      "team": null,
+      "rating": 4
+    }
+  ]
+}
+```
 
-# Выполнить импорт
-docker exec -it hockey-api python /app/scripts/import_db.py /hockey-db.zip
-Проверить содержимое /var/www/hockey-json (можно через docker exec или через nginx/HTTP).
+---
 
-7.3. Вариант B: авто-импорт по URL
-Разместить hockey-db.zip по HTTPS/HTTP URL, доступному с нового сервера:
+### 7.6. Завершённая игра
 
-например, положить файл на какой-нибудь статический хостинг или на свой nginx.
+**POST** `/api/upload-finished-game`
 
-В .env на новом сервере настроить:
+Сохраняет игру в:
 
-dotenv
-Копировать код
-DB_IMPORT_MODE=url
-DB_IMPORT_SOURCE=https://example.com/hockey-db.zip
-DB_FORCE_RESET=false   # true, если хотим перезатереть существующую базу
-Перезапустить стек:
+```
+finished/<season>/<gameId>.json
+```
 
-bash
-Копировать код
-docker compose down
-docker compose up -d --build
-В логах hockey-api увидеть:
+Автоматически запускает пересборку индексов.
 
-скачивание ZIP;
+---
 
-успешный импорт;
+### 7.7. Удаление завершённой игры
 
-запуск пересчёта индексов.
+**POST** `/api/delete-finished-game`
 
-8. Основные API-эндпоинты
-Полные форматы — в SPEC_JSON.md. Здесь только сводка.
+Удаляет файл и пересобирает индексы.
 
-Все запросы — с заголовком:
+---
 
-http
-Копировать код
-X-Api-Key: <UPLOAD_API_KEY>
-Content-Type: application/json
-8.1. Логгер любого JSON
-POST /api/upload-json
-Сохраняет любой JSON в incoming/<timestamp>_<rand>.json.
+### 7.8. Ростер на игру
 
-8.2. Активная игра
-POST /api/upload-active-game
-Сохраняет JSON активной игры в active_game.json.
+**POST** `/api/upload-roster`
 
-8.3. Корневой индекс сезонов
-POST /api/upload-root-index
-Сохраняет корневой index.json.
+Полностью очищает `rosters/` и создаёт `rosters/roster.json`.
 
-8.4. Статистика игроков сезона
-POST /api/upload-players-stats
-Сохраняет stats/<season>/players.json.
+---
 
-8.5. Индекс завершённых игр сезона
-POST /api/upload-finished-index
-Сохраняет finished/<season>/index.json.
+### 7.9. Настройки приложения
 
-8.6. Завершённая игра
-POST /api/upload-finished-game
-Сохраняет finished/<season>/<id>.json и триггерит пересчёт индексов.
+**POST** `/api/upload-settings`
 
-8.7. Удаление завершённой игры
-POST /api/delete-finished-game
-Удаляет finished/<season>/<id>.json (или путь file) и пересчитывает индексы.
+Сохраняет `settings/app_settings.json`.
 
-8.8. Выгрузка всей базы
-GET /api/download-db
-Отдаёт ZIP hockey-db.zip со всей базой.
+---
 
-8.9. Текущий ростер
-POST /api/upload-roster
-Очищает rosters/ и сохраняет rosters/roster.json.
+### 7.10. Выгрузка всей базы
 
-8.10. Настройки приложения
-POST /api/upload-settings
-Сохраняет settings/app_settings.json.
+**GET** `/api/download-db`
 
-8.11. Базовый список игроков
-POST /api/upload-base-roster
-Сохраняет base_roster/base_players.json.
+Отдаёт ZIP-архив всей базы (`hockey-db.zip`).
 
-9. Локальный запуск без Docker (для разработки)
-Для разработки можно запустить Flask-приложение напрямую.
+---
 
-bash
-Копировать код
-# В корне репозитория
-python -m venv .venv
-source .venv/bin/activate
+## 8. Telegram-бот и рейтинги игроков
 
-pip install --upgrade pip
-pip install -r requirements.txt
+Telegram-бот **не работает напрямую с Android-базой**.
 
-# Создать базовую директорию данных (локально)
-mkdir -p /var/www/hockey-json
+Его задача:
 
-# Задать API-ключ (обязателен)
-export UPLOAD_API_KEY=DEV_SECRET_KEY
+* формировать файл рейтингов игроков;
+* **обязательно указывать `full_name`**;
+* отправлять JSON в `/api/upload-base-roster`.
 
-# Запустить Flask (dev-сервер)
-export FLASK_APP=app.upload_api
-flask run --host=0.0.0.0 --port=5001
-После этого API будет доступен по адресу:
+Сервер **не делает слияние**, он хранит файл как есть.
+Сопоставление игроков происходит по `full_name`.
 
-text
-Копировать код
-http://localhost:5001/api/...
-(В production обязательно использовать gunicorn + nginx/Traefik, как в Docker-стеке.)
+---
 
-10. Итог
-Репозиторий содержит полный, готовый к деплою стек backend-сервера хоккейного табло.
+## 9. Итог
 
-Развёртывание нового сервера сводится к:
+Этот репозиторий является **единственным источником правды** для backend-сервера
+хоккейного табло.
 
-git clone ...
+Развёртывание нового сервера:
 
-.env (API-ключ, email, режим импорта базы)
+1. `git clone`
+2. `sudo ./install.sh`
+3. Ввод домена, e-mail, API-ключа
+4. Проверка HTTPS и базы
 
-docker compose up -d --build
+Все клиенты (Android, Telegram, web) обязаны:
 
-База может быть автоматически импортирована:
-
-либо вручную через docker cp + import_db.py,
-
-либо автоматически по URL при первом старте контейнера.
-
-Все детали форматов JSON — в SPEC_JSON.md. Этот README описывает инфраструктуру, деплой и сценарии восстановления сервера.
+* работать через `/api/...`;
+* передавать `X-Api-Key`;
+* использовать `full_name` как основной идентификатор игрока.
