@@ -425,4 +425,70 @@ echo -e "${YELLOW}[*] Проверяю наличие базы по корнев
 if docker exec -it hockey-api sh -lc '[ -s /var/www/hockey-json/index.json ]'; then
   echo -e "${GREEN}[+] База обнаружена: /var/www/hockey-json/index.json существует и не пустой.${RESET}"
 
-  CUR_SEASON=$(docker exec -it hockey-api sh -lc 'python -c "import json; print(json.load(open(\"/var/www/hockey-json/index.json\",\"r\",encoding=\"utf-8\")).get(\"currentSeason\",\"\"))" 2>_
+  CUR_SEASON=$(docker exec -it hockey-api sh -lc 'python -c "import json; print(json.load(open(\"/var/www/hockey-json/index.json\",\"r\",encoding=\"utf-8\")).get(\"currentSeason\",\"\"))" 2>/dev/null' | tr -d '\r' || true)
+  if [ -n "$CUR_SEASON" ]; then
+    echo -e "${GREEN}    currentSeason:${RESET} $CUR_SEASON"
+  fi
+else
+  echo -e "${RED}[!] База НЕ обнаружена: /var/www/hockey-json/index.json отсутствует или пустой.${RESET}"
+  echo
+  echo -e "${YELLOW}Диагностика (последние 200 строк хоккей-api):${RESET}"
+  docker logs hockey-api --tail=200 || true
+  echo
+  echo -e "${YELLOW}Содержимое /var/www/hockey-json внутри контейнера:${RESET}"
+  docker exec -it hockey-api ls -la /var/www/hockey-json || true
+fi
+
+# 6.3. Подсказка: где физически лежит volume (для WinSCP)
+echo
+echo -e "${YELLOW}[*] Где лежит база на хосте (для WinSCP):${RESET}"
+if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
+  MP=$(docker volume inspect "$VOLUME_NAME" --format '{{.Mountpoint}}' | tr -d '\r')
+  echo -e "  Volume: ${BOLD}${VOLUME_NAME}${RESET}"
+  echo -e "  Mountpoint: ${BOLD}${MP}${RESET}"
+else
+  echo -e "${YELLOW}[!] Volume ${VOLUME_NAME} не найден. Проверь docker volume ls.${RESET}"
+fi
+
+# 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
+echo
+echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
+
+if [ -n "$API_KEY" ]; then
+  echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
+  echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
+  echo
+  echo -e "  ${BOLD}API-ключ:${RESET} $API_KEY"
+  echo
+else
+  echo -e "${YELLOW}Ты оставил поле API-ключа пустым — ключ сгенерирован автоматически контейнером.${RESET}"
+  echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
+  echo
+  echo "Команда для получения API-ключа:"
+  echo "  docker logs хоккей-api | grep \"API Key\" | tail -n 1"
+  echo
+
+  GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
+  if [ -n "$GENERATED_KEY" ]; then
+    echo -e "${GREEN}Автоматически найден сгенерированный ключ:${RESET}"
+    echo
+    echo -e "  ${BOLD}API-ключ:${RESET} $GENERATED_KEY"
+    echo
+  else
+    echo -e "${RED}Не удалось автоматически прочитать ключ из логов.${RESET}"
+    echo "Выполни команду вручную и запиши ключ:"
+    echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
+    echo
+  fi
+fi
+
+echo -e "${BOLD}Без правильного API-ключа Android-приложение НЕ сможет синхронизировать базу.${RESET}"
+echo
+echo "Дальше:"
+echo "  1) Запиши/сохрани API-ключ."
+echo "  2) Открой приложение на Android и внеси:"
+echo "     - адрес сервера: https://$DOMAIN"
+echo "     - API-ключ: (тот, который записал)"
+echo "  3) Проверь синхронизацию."
+echo
+echo -e "${GREEN}=== Установка завершена ===${RESET}"
