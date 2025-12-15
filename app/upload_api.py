@@ -224,28 +224,28 @@ def upload_base_roster():
     save_json_relative(rel_path, data)
 
     return jsonify({"status": "ok", "file": rel_path})
-    # ---------- 8. Рейтинги игроков: base_roster/ratings.json ----------
-    
-    @app.route("/api/upload-ratings", methods=["POST"])
-    def upload_ratings():
-        """
-        Принимает JSON с рейтингами игроков и сохраняет его в:
-        BASE_DIR/base_roster/ratings.json
-    
-        ВАЖНО: на этом этапе JSON может иметь произвольную структуру —
-        сервер сохраняет файл "как есть", без слияния с base_players.json.
-        """
-        try:
-            data = request.get_json(force=True)
-        except Exception:
-            return jsonify({"status": "error", "message": "Invalid JSON"}), 400
-    
-        rel_path = "base_roster/ratings.json"
-        save_json_relative(rel_path, data)
-    
-        return jsonify({"status": "ok", "file": rel_path})
-    
 
+
+# ---------- Z. Рейтинги игроков: base_roster/ratings.json ----------
+
+@app.route("/api/upload-ratings", methods=["POST"])
+def upload_ratings():
+    """
+    Принимает JSON с рейтингами игроков и сохраняет его в:
+    BASE_DIR/base_roster/ratings.json
+
+    ВАЖНО: на этом этапе JSON может иметь произвольную структуру —
+    сервер сохраняет файл "как есть", без слияния с base_players.json.
+    """
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+    rel_path = "base_roster/ratings.json"
+    save_json_relative(rel_path, data)
+
+    return jsonify({"status": "ok", "file": rel_path})
 
 
 # ---------- 4. Статистика игроков: stats/<season>/players.json ----------
