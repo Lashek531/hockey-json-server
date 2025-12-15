@@ -300,82 +300,122 @@ echo "Проверь контейнеры:"
 echo "  docker compose ps"
 echo
 
-check_https_once() {
+# --- HTTPS / Let's Encrypt: строгая проверка + ожидание ---
+
+# Возвращает 0 (OK) или 1 (не OK).
+# При не OK печатает диагностику в STDERR (не роняет скрипт).
+check_https_strict() {
   local dom="$1"
 
-  echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата для домена ${dom}...${RESET}" >&2
-
-  # Проверяем A-запись домена
+  # 0) Проверяем A-запись домена (если знаем IP)
   if [ -n "$SERVER_IP" ]; then
     local dom_ip
     dom_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk 'NR==1 {print $1}' || true)
 
     if [ -z "$dom_ip" ]; then
       echo -e "${RED}[!] Домен ${dom} не резолвится в IPv4-адрес.${RESET}" >&2
-      echo 0
-      return
+      return 1
     fi
 
     if [ "$dom_ip" != "$SERVER_IP" ]; then
       echo -e "${RED}[!] Домен ${dom} указывает на IP ${dom_ip}, а этот сервер имеет IP ${SERVER_IP}.${RESET}" >&2
-      echo 0
-      return
+      return 1
     fi
   fi
 
-  # 1) Ждём, пока HTTPS вообще начнёт отвечать (без требований к доверию)
-  local reachable=0
-  for _ in $(seq 1 24); do
-    if curl -sS -k --max-time 5 "https://$dom/" -o /dev/null; then
-      reachable=1
-      break
-    fi
-    sleep 5
-  done
-
-  if [ "$reachable" -ne 1 ]; then
-    echo -e "${RED}[!] HTTPS не отвечает (даже с -k).${RESET}" >&2
-    echo 0
-    return
+  # 1) HTTPS должен отвечать хотя бы "как-то" (на случай, если сервис ещё не поднялся)
+  if ! curl -sS -k --max-time 5 "https://$dom/" -o /dev/null >/dev/null 2>&1; then
+    echo -e "${YELLOW}[i] HTTPS пока не отвечает (даже с -k).${RESET}" >&2
+    return 1
   fi
 
-  # 2) Проверяем, что сертификат УЖЕ доверенный (без -k)
-  if curl -sS --max-time 8 "https://$dom/" -o /dev/null; then
-    # 3) Дополнительно проверяем, что не отдан дефолтный TRAEFIK DEFAULT CERT
-    local cert_subj
-    cert_subj=$(echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
-      | openssl x509 -noout -subject 2>/dev/null | tr -d '\r' || true)
-
-    if echo "$cert_subj" | grep -q "TRAEFIK DEFAULT CERT"; then
-      echo -e "${RED}[!] HTTPS отвечает, но выдан TRAEFIK DEFAULT CERT (не Let's Encrypt).${RESET}" >&2
-      echo 0
-      return
-    fi
-
-    echo 1
-    return
+  # 2) Доверенная проверка (без -k) — must have
+  if ! curl -sS --max-time 8 "https://$dom/" -o /dev/null >/dev/null 2>&1; then
+    echo -e "${YELLOW}[i] HTTPS отвечает, но доверенная проверка (curl без -k) пока не проходит.${RESET}" >&2
+    echo -e "${YELLOW}    Сертификат сейчас:${RESET}" >&2
+    echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
+      | openssl x509 -noout -subject -issuer -dates 2>/dev/null >&2 || true
+    return 1
   fi
 
-  # Если доверенная проверка не прошла — печатаем диагностику сертификата
-  echo -e "${YELLOW}[!] HTTPS отвечает, но доверенная проверка (без -k) не прошла.${RESET}" >&2
-  echo -e "${YELLOW}    Диагностика сертификата:${RESET}" >&2
-  echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
-    | openssl x509 -noout -subject -issuer -dates 2>/dev/null >&2 || true
+  # 3) Смотрим issuer/subject и отсекаем дефолтный сертификат Traefik
+  local cert_info issuer subject
+  cert_info=$(echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
+    | openssl x509 -noout -subject -issuer 2>/dev/null | tr -d '\r' || true)
 
-  echo 0
+  issuer=$(echo "$cert_info" | grep -i '^issuer=' || true)
+  subject=$(echo "$cert_info" | grep -i '^subject=' || true)
+
+  if echo "$cert_info" | grep -q "TRAEFIK DEFAULT CERT"; then
+    echo -e "${YELLOW}[i] Отдан TRAEFIK DEFAULT CERT — Let's Encrypt ещё не применён.${RESET}" >&2
+    return 1
+  fi
+
+  # 4) Именно Let's Encrypt (по Issuer). Обычно там присутствует "Let's Encrypt".
+  # Это строгое требование из твоего ТЗ.
+  if ! echo "$issuer" | grep -qi "Let's Encrypt"; then
+    echo -e "${YELLOW}[i] Сертификат доверенный, но Issuer не похож на Let's Encrypt.${RESET}" >&2
+    echo -e "${YELLOW}    ${issuer}${RESET}" >&2
+    echo -e "${YELLOW}    ${subject}${RESET}" >&2
+    return 1
+  fi
+
+  return 0
 }
 
-# 6.1. Проверка HTTPS (строго: доверенный сертификат и не дефолтный)
-CERT_OK=$(check_https_once "$DOMAIN")
+# Ожидание сертификата: 1 минута по умолчанию, потом спрашиваем "ждать дальше?"
+wait_for_lets_encrypt() {
+  local dom="$1"
+  local step_sec=5
+  local window_sec=60
 
-if [ "$CERT_OK" -eq 1 ]; then
-  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ в порядке: сертификат доверенный, не TRAEFIK DEFAULT CERT.${RESET}"
-else
-  echo -e "${RED}[!] HTTPS для https://$DOMAIN/ НЕ подтверждён как доверенный сертификат.${RESET}"
-  echo
-  echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 50 строк):${RESET}"
-  docker logs traefik 2>/dev/null | grep -Ei 'acme|let.?s encrypt|challenge|cert|error|unable|timeout|forbidden|Register|new-order' | tail -n 50 || true
-  echo
+  echo -e "${YELLOW}[*] Проверяю выпуск HTTPS-сертификата Let's Encrypt для домена ${dom}...${RESET}"
+  echo -e "${YELLOW}    Сейчас Traefik может несколько десятков секунд выпускать и применять сертификат.${RESET}"
+
+  while true; do
+    local elapsed=0
+    echo -ne "${YELLOW}    Проверяю${RESET}"
+
+    while [ "$elapsed" -lt "$window_sec" ]; do
+      # Точки прогресса
+      echo -ne "${YELLOW}.${RESET}"
+      if check_https_strict "$dom"; then
+        echo
+        echo -e "${GREEN}[+] HTTPS для https://${dom}/ в порядке: доверенный сертификат Let's Encrypt установлен.${RESET}"
+        return 0
+      fi
+      sleep "$step_sec"
+      elapsed=$((elapsed + step_sec))
+    done
+
+    echo
+    echo -e "${RED}[!] За последние ${window_sec} секунд сертификат Let's Encrypt ещё не подтверждён.${RESET}"
+    echo
+    echo "  1) Продолжать ждать"
+    echo "  2) Не ждать дальше (продолжить установку без ожидания сертификата)"
+    while true; do
+      read -rp "Выбор [1/2]: " CHW
+      case "$CHW" in
+        1) break ;;
+        2)
+          echo -e "${YELLOW}[!] Ожидание сертификата пропущено по выбору пользователя.${RESET}"
+          echo -e "${YELLOW}    Логи Traefik (ACME/Let's Encrypt), последние 80 строк:${RESET}"
+          docker logs traefik 2>/dev/null | grep -Ei 'acme|let.?s encrypt|challenge|cert|error|unable|timeout|forbidden|Register|new-order' | tail -n 80 || true
+          echo
+          return 1
+          ;;
+        *)
+          echo "Введите 1 или 2."
+          ;;
+      esac
+    done
+  done
+}
+
+# 6.1. Ждём Let's Encrypt (строго)
+if ! wait_for_lets_encrypt "$DOMAIN"; then
+  echo -e "${YELLOW}[i] Установка продолжена без гарантии валидного Let's Encrypt на данный момент.${RESET}"
+  echo -e "${YELLOW}    Обычно это означает DNS/порты/ACME-challenge или время выпуска. Проверь позже https://${DOMAIN}/.${RESET}"
 fi
 
 # 6.2. Надёжная проверка базы (истина) — по /var/www/hockey-json/index.json внутри контейнера
@@ -385,70 +425,4 @@ echo -e "${YELLOW}[*] Проверяю наличие базы по корнев
 if docker exec -it hockey-api sh -lc '[ -s /var/www/hockey-json/index.json ]'; then
   echo -e "${GREEN}[+] База обнаружена: /var/www/hockey-json/index.json существует и не пустой.${RESET}"
 
-  CUR_SEASON=$(docker exec -it hockey-api sh -lc 'python -c "import json; print(json.load(open(\"/var/www/hockey-json/index.json\",\"r\",encoding=\"utf-8\")).get(\"currentSeason\",\"\"))" 2>/dev/null' | tr -d '\r' || true)
-  if [ -n "$CUR_SEASON" ]; then
-    echo -e "${GREEN}    currentSeason:${RESET} $CUR_SEASON"
-  fi
-else
-  echo -e "${RED}[!] База НЕ обнаружена: /var/www/hockey-json/index.json отсутствует или пустой.${RESET}"
-  echo
-  echo -e "${YELLOW}Диагностика (последние 200 строк хоккей-api):${RESET}"
-  docker logs hockey-api --tail=200 || true
-  echo
-  echo -e "${YELLOW}Содержимое /var/www/hockey-json внутри контейнера:${RESET}"
-  docker exec -it hockey-api ls -la /var/www/hockey-json || true
-fi
-
-# 6.3. Подсказка: где физически лежит volume (для WinSCP)
-echo
-echo -e "${YELLOW}[*] Где лежит база на хосте (для WinSCP):${RESET}"
-if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
-  MP=$(docker volume inspect "$VOLUME_NAME" --format '{{.Mountpoint}}' | tr -d '\r')
-  echo -e "  Volume: ${BOLD}${VOLUME_NAME}${RESET}"
-  echo -e "  Mountpoint: ${BOLD}${MP}${RESET}"
-else
-  echo -e "${YELLOW}[!] Volume ${VOLUME_NAME} не найден. Проверь docker volume ls.${RESET}"
-fi
-
-# 7. ЯРКОЕ ПРЕДУПРЕЖДЕНИЕ ПРО API-КЛЮЧ
-echo
-echo -e "${RED}${BOLD}ВНИМАНИЕ!${RESET}"
-
-if [ -n "$API_KEY" ]; then
-  echo -e "${RED}Ты задал свой API-ключ вручную при установке.${RESET}"
-  echo -e "${BOLD}Обязательно запиши его и внеси в настройки Android-приложения:${RESET}"
-  echo
-  echo -e "  ${BOLD}API-ключ:${RESET} $API_KEY"
-  echo
-else
-  echo -e "${YELLOW}Ты оставил поле API-ключа пустым — ключ сгенерирован автоматически контейнером.${RESET}"
-  echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
-  echo
-  echo "Команда для получения API-ключа:"
-  echo "  docker logs хоккей-api | grep \"API Key\" | tail -n 1"
-  echo
-
-  GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
-  if [ -n "$GENERATED_KEY" ]; then
-    echo -e "${GREEN}Автоматически найден сгенерированный ключ:${RESET}"
-    echo
-    echo -e "  ${BOLD}API-ключ:${RESET} $GENERATED_KEY"
-    echo
-  else
-    echo -e "${RED}Не удалось автоматически прочитать ключ из логов.${RESET}"
-    echo "Выполни команду вручную и запиши ключ:"
-    echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
-    echo
-  fi
-fi
-
-echo -e "${BOLD}Без правильного API-ключа Android-приложение НЕ сможет синхронизировать базу.${RESET}"
-echo
-echo "Дальше:"
-echo "  1) Запиши/сохрани API-ключ."
-echo "  2) Открой приложение на Android и внеси:"
-echo "     - адрес сервера: https://$DOMAIN"
-echo "     - API-ключ: (тот, который записал)"
-echo "  3) Проверь синхронизацию."
-echo
-echo -e "${GREEN}=== Установка завершена ===${RESET}"
+  CUR_SEASON=$(docker exec -it hockey-api sh -lc 'python -c "import json; print(json.load(open(\"/var/www/hockey-json/index.json\",\"r\",encoding=\"utf-8\")).get(\"currentSeason\",\"\"))" 2>_
