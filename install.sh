@@ -40,6 +40,13 @@ else
   echo -e "${GREEN}[*] Docker уже установлен, пропускаю установку.${RESET}"
 fi
 
+# 2.2. openssl нужен для проверки сертификата
+if ! command -v openssl >/dev/null 2>&1; then
+  echo -e "${YELLOW}[*] openssl не найден. Устанавливаю openssl...${RESET}"
+  apt update
+  apt install -y openssl
+fi
+
 echo
 
 # 2.1. Определяем публичный IP этого сервера (для проверки A-записи домена)
@@ -136,15 +143,12 @@ elif [ "$DB_MODE" = "url" ]; then
     DB_MODE="none"
     DB_SOURCE=""
   else
-    # === Интерактивная проверка URL источника базы ===
     while true; do
       SRC="$DB_SOURCE"
 
-      # Приведение к корректному URL
       if echo "$SRC" | grep -Eq '^https?://'; then
-        : # уже полный URL
+        :
       else
-        # если нет протокола — считаем, что это домен
         if echo "$SRC" | grep -q '/'; then
           SRC="https://$SRC"
         else
@@ -153,8 +157,6 @@ elif [ "$DB_MODE" = "url" ]; then
       fi
 
       echo -e "${YELLOW}[*] Проверяю доступность: $SRC ...${RESET}"
-
-      # -L: следовать редиректам, -k: не валиться на self-signed, -m: таймаут
       HTTP_CODE=$(curl -s -L -k -o /dev/null -w "%{http_code}" -m 15 "$SRC" || echo "000")
 
       if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
@@ -210,7 +212,6 @@ echo
 write_env() {
   echo -e "${YELLOW}[*] Записываю .env...${RESET}"
 
-  # Если выбран импорт базы (local/url) — значит сознательно перезатираем текущую базу.
   local FORCE_RESET="false"
   if [ "$DB_MODE" != "none" ]; then
     FORCE_RESET="true"
@@ -272,7 +273,6 @@ restart_stack() {
   docker compose down
   docker compose up -d --build
 
-  # Если выбран импорт — сбрасываем флаг инициализации, чтобы импорт точно стартовал.
   if [ "$DB_MODE" != "none" ]; then
     echo -e "${YELLOW}[*] Выбран импорт базы: сбрасываю флаг /var/www/hockey-json/.initialized...${RESET}"
 
@@ -284,8 +284,6 @@ restart_stack() {
     docker exec -it hockey-api sh -lc 'rm -f /var/www/hockey-json/.initialized || true'
     echo -e "${YELLOW}[*] Перезапускаю hockey-api для выполнения импорта...${RESET}"
     docker compose restart hockey-api
-
-    # даём entrypoint начать работу
     sleep 2
   fi
 }
@@ -313,99 +311,71 @@ check_https_once() {
     dom_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk 'NR==1 {print $1}' || true)
 
     if [ -z "$dom_ip" ]; then
-      echo -e "${RED}[!] Домен ${dom} не резолвится в IPv4-адрес. Let's Encrypt не сможет подключиться к серверу.${RESET}" >&2
+      echo -e "${RED}[!] Домен ${dom} не резолвится в IPv4-адрес.${RESET}" >&2
       echo 0
       return
     fi
 
     if [ "$dom_ip" != "$SERVER_IP" ]; then
-      echo -e "${RED}[!] Домен ${dom} сейчас указывает на IP ${dom_ip}, а этот сервер имеет IP ${SERVER_IP}.${RESET}" >&2
-      echo -e "${YELLOW}    Исправь A-запись домена или используй другой домен, затем запусти установку снова.${RESET}" >&2
+      echo -e "${RED}[!] Домен ${dom} указывает на IP ${dom_ip}, а этот сервер имеет IP ${SERVER_IP}.${RESET}" >&2
       echo 0
       return
     fi
   fi
 
-  local ok=0
-  # даём до 24 попыток (~2 минуты)
+  # 1) Ждём, пока HTTPS вообще начнёт отвечать (без требований к доверию)
+  local reachable=0
   for _ in $(seq 1 24); do
-    # Важно: если сертификат ещё self-signed, curl без -k падает.
-    # Здесь проверяем сам факт доступности HTTPS, а не доверие.
     if curl -sS -k --max-time 5 "https://$dom/" -o /dev/null; then
-      ok=1
+      reachable=1
       break
     fi
     sleep 5
   done
-  echo "$ok"
+
+  if [ "$reachable" -ne 1 ]; then
+    echo -e "${RED}[!] HTTPS не отвечает (даже с -k).${RESET}" >&2
+    echo 0
+    return
+  fi
+
+  # 2) Проверяем, что сертификат УЖЕ доверенный (без -k)
+  if curl -sS --max-time 8 "https://$dom/" -o /dev/null; then
+    # 3) Дополнительно проверяем, что не отдан дефолтный TRAEFIK DEFAULT CERT
+    local cert_subj
+    cert_subj=$(echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
+      | openssl x509 -noout -subject 2>/dev/null | tr -d '\r' || true)
+
+    if echo "$cert_subj" | grep -q "TRAEFIK DEFAULT CERT"; then
+      echo -e "${RED}[!] HTTPS отвечает, но выдан TRAEFIK DEFAULT CERT (не Let's Encrypt).${RESET}" >&2
+      echo 0
+      return
+    fi
+
+    echo 1
+    return
+  fi
+
+  # Если доверенная проверка не прошла — печатаем диагностику сертификата
+  echo -e "${YELLOW}[!] HTTPS отвечает, но доверенная проверка (без -k) не прошла.${RESET}" >&2
+  echo -e "${YELLOW}    Диагностика сертификата:${RESET}" >&2
+  echo | openssl s_client -connect "$dom:443" -servername "$dom" 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -dates 2>/dev/null >&2 || true
+
+  echo 0
 }
 
-# 6.1. Проверка HTTPS
+# 6.1. Проверка HTTPS (строго: доверенный сертификат и не дефолтный)
 CERT_OK=$(check_https_once "$DOMAIN")
 
 if [ "$CERT_OK" -eq 1 ]; then
-  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ доступен.${RESET}"
+  echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ в порядке: сертификат доверенный, не TRAEFIK DEFAULT CERT.${RESET}"
 else
-  echo -e "${RED}[!] Не удалось подтвердить доступность HTTPS для https://$DOMAIN/ в отведённое время.${RESET}"
+  echo -e "${RED}[!] HTTPS для https://$DOMAIN/ НЕ подтверждён как доверенный сертификат.${RESET}"
   echo
-  echo -e "${YELLOW}Проверь, пожалуйста:${RESET}"
-  echo "  1) Правильно ли введён домен: $DOMAIN"
-  if [ -n "$SERVER_IP" ]; then
-    echo "  2) Указывает ли A-запись домена на IP этого сервера: $SERVER_IP"
-  else
-    echo "  2) Указывает ли A-запись домена на IP этого сервера"
-  fi
-  echo "  3) Не слишком ли недавно зарегистрирован/изменён домен (нужно время на обновление DNS)"
+  echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 50 строк):${RESET}"
+  docker logs traefik 2>/dev/null | grep -Ei 'acme|let.?s encrypt|challenge|cert|error|unable|timeout|forbidden|Register|new-order' | tail -n 50 || true
   echo
-  echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 30 строк):${RESET}"
-  docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 30 || true
-  echo
-
-  read -rp "Изменить домен и e-mail и попробовать снова? [y/N]: " RETRY
-  case "$RETRY" in
-    y|Y|д|Д)
-      echo
-      echo "Введите НОВЫЙ домен (FQDN), который реально указывает на этот сервер:"
-      read -rp "Домен (FQDN): " DOMAIN
-
-      echo
-      echo "Введите НОВЫЙ корректный e-mail для Let's Encrypt:"
-      while true; do
-        read -rp "E-mail для Let's Encrypt: " ACME_EMAIL
-        if echo "$ACME_EMAIL" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
-          break
-        fi
-        echo -e "${RED}[!] Похоже, адрес e-mail некорректен. Попробуй ещё раз.${RESET}"
-      done
-
-      echo
-      echo -e "${BOLD}Новые параметры для HTTPS:${RESET}"
-      echo "  Домен:  $DOMAIN"
-      echo "  E-mail: $ACME_EMAIL"
-      echo
-
-      write_env
-      update_traefik_host
-
-      echo -e "${YELLOW}[*] Перезапускаю docker compose с новыми параметрами домена (full recreate)...${RESET}"
-      restart_stack
-
-      CERT_OK=$(check_https_once "$DOMAIN")
-      if [ "$CERT_OK" -eq 1 ]; then
-        echo -e "${GREEN}[+] HTTPS для https://$DOMAIN/ доступен.${RESET}"
-      else
-        echo -e "${RED}[!] Даже после изменения домена/e-mail не удалось подтвердить доступность HTTPS.${RESET}"
-        echo -e "${YELLOW}Логи Traefik по ACME/Let's Encrypt (последние 30 строк):${RESET}"
-        docker logs traefik 2>/dev/null | grep -Ei 'acme|cert|error' | tail -n 30 || true
-        echo
-        echo "Проверь DNS, настройки домена и логи Traefik:"
-        echo "  docker logs traefik | grep -Ei 'acme|cert|error'"
-      fi
-      ;;
-    *)
-      echo -e "${YELLOW}Параметры домена не менялись. Продолжаю установку, но HTTPS может быть некорректен.${RESET}"
-      ;;
-  esac
 fi
 
 # 6.2. Надёжная проверка базы (истина) — по /var/www/hockey-json/index.json внутри контейнера
@@ -422,7 +392,7 @@ if docker exec -it hockey-api sh -lc '[ -s /var/www/hockey-json/index.json ]'; t
 else
   echo -e "${RED}[!] База НЕ обнаружена: /var/www/hockey-json/index.json отсутствует или пустой.${RESET}"
   echo
-  echo -e "${YELLOW}Диагностика (последние 200 строк hockey-api):${RESET}"
+  echo -e "${YELLOW}Диагностика (последние 200 строк хоккей-api):${RESET}"
   docker logs hockey-api --tail=200 || true
   echo
   echo -e "${YELLOW}Содержимое /var/www/hockey-json внутри контейнера:${RESET}"
@@ -455,7 +425,7 @@ else
   echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
   echo
   echo "Команда для получения API-ключа:"
-  echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
+  echo "  docker logs хоккей-api | grep \"API Key\" | tail -n 1"
   echo
 
   GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
