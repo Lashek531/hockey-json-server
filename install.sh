@@ -217,6 +217,13 @@ write_env() {
     FORCE_RESET="true"
   fi
 
+  # Сохраняем S3_* из существующего .env (если он уже есть в репозитории или остался от прошлого запуска)
+  local S3_BLOCK=""
+  if [ -f .env ]; then
+    S3_BLOCK="$(grep -E '^(# S3 backup|S3_)' .env || true)"
+  fi
+
+  # Пишем новый .env (параметры, которые задаёт install)
   cat > .env <<EOF
 UPLOAD_API_KEY=${API_KEY}
 
@@ -228,10 +235,17 @@ DB_IMPORT_SOURCE=${DB_SOURCE}
 DB_FORCE_RESET=${FORCE_RESET}
 EOF
 
+  # Возвращаем S3_* как дефолты (если были)
+  if [ -n "$S3_BLOCK" ]; then
+    echo "" >> .env
+    echo "$S3_BLOCK" >> .env
+  fi
+
   echo "[*] Содержимое .env:"
   cat .env
   echo
 }
+
 
 # 5. Обновляем traefik/*.yml под домен
 update_traefik_host() {
