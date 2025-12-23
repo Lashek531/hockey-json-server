@@ -15,6 +15,7 @@ if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Запусти этот скрипт от root (например: sudo ./install.sh)${RESET}"
   exit 1
 fi
+cd "$(dirname "$0")"
 
 # 2. Установка Docker + Docker Compose (если ещё нет)
 if ! command -v docker >/dev/null 2>&1; then
@@ -479,7 +480,7 @@ else
   echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
   echo
   echo "Команда для получения API-ключа:"
-  echo "  docker logs хоккей-api | grep \"API Key\" | tail -n 1"
+  echo "  docker logs hockey-api | grep "API Key" | tail -n 1"
   echo
 
   GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
