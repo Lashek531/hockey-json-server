@@ -480,7 +480,7 @@ else
   echo -e "${BOLD}Тебе ОБЯЗАТЕЛЬНО нужно его посмотреть и сохранить для Android-приложения!${RESET}"
   echo
   echo "Команда для получения API-ключа:"
-  echo "  docker logs hockey-api | grep "API Key" | tail -n 1"
+  echo "  docker logs hockey-api | grep \"API Key\" | tail -n 1"
   echo
 
   GENERATED_KEY=$(docker logs hockey-api 2>/dev/null | grep "API Key" | tail -n 1 | sed 's/.*API Key: //')
