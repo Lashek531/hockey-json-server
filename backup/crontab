@@ -1,3 +1,2 @@
 # Бэкап раз в неделю: понедельник 04:00 (время внутри контейнера)
-0 4 * * 1 /usr/local/bin/backup.sh >> /var/log/hockey-backup.log 2>&1
-
+0 4 * * 1 /usr/local/bin/backup_cron.sh >> /var/log/hockey-backup.log 2>&1
